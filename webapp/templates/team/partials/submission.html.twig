@@ -63,12 +63,21 @@
             {% endif %}
         {% endif %}
 
-        {% if showSampleOutput and judging.result != 'compiler-error' %}
+        {% if (showSampleOutput or showAllOutput != 0) and judging.result != 'compiler-error' %}
             <hr/>
-            <h4 class="text-center">Run(s) on the provided sample data</h4>
+            <h4 class="text-center">
+                Run(s) on
+                {% if showSampleOutput and showAllOutput == 0 %}
+                    the provided sample data
+                {% else %}
+                    all data
+                {% endif %}
+            </h4>
+
+            {% dump(runs) %}
 
             {% if runs is empty %}
-                <p class="nodata">No sample cases available.</p>
+                <p class="nodata">No cases available.</p>
             {% else %}
                 {% for run in runs %}
                     <h5 id="run-{{ run.0.rank }}" class="text-center mt-4">Run {{ run.0.rank }}</h5>
@@ -100,28 +109,30 @@
                             </div>
                         </div>
 
-                        <h6 class="text-center">Program output</h6>
-                        {% if run.output_run is not empty %}
-                            <pre class="output_text">
-{{ run.output_run }}</pre>
-                        {% else %}
-                            <p class="nodata">There was no program output.</p>
-                        {% endif %}
+                        {% if (showSampleOutput and run.0.sample) or (showAllOutput == 2) %}
+                            <h6 class="text-center">Program output</h6>
+                            {% if run.output_run is not empty %}
+                                <pre class="output_text">
+    {{ run.output_run }}</pre>
+                            {% else %}
+                                <p class="nodata">There was no program output.</p>
+                            {% endif %}
 
-                        <h6 class="text-center">Diff output</h6>
-                        {% if run.output_diff is not empty %}
-                            <pre class="output_text">
-{{ run.output_diff }}</pre>
-                        {% else %}
-                            <p class="nodata">There was no diff output.</p>
-                        {% endif %}
+                            <h6 class="text-center">Diff output</h6>
+                            {% if run.output_diff is not empty %}
+                                <pre class="output_text">
+    {{ run.output_diff }}</pre>
+                            {% else %}
+                                <p class="nodata">There was no diff output.</p>
+                            {% endif %}
 
-                        <h6 class="text-center">Error output (info/debug/errors)</h6>
-                        {% if run.output_error is not empty %}
-                            <pre class="output_text">
-{{ run.output_error }}</pre>
-                        {% else %}
-                            <p class="nodata">There was no stderr output.</p>
+                            <h6 class="text-center">Error output (info/debug/errors)</h6>
+                            {% if run.output_error is not empty %}
+                                <pre class="output_text">
+    {{ run.output_error }}</pre>
+                            {% else %}
+                                <p class="nodata">There was no stderr output.</p>
+                            {% endif %}
                         {% endif %}
                     {% endif %}
                 {% endfor %}

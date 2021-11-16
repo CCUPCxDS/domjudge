@@ -40,6 +40,29 @@
                 <div class="p-2">
                     Run result: {{ judging.result | printResult }}
                 </div>
+                {% if runs %}
+                    <div class="p-2">
+                        Test Cases: 
+                        <div class="d-inline-flex flex-row">
+                            {% for run in runs %}
+                                <div style="margin-left: .1rem; margin-right: .1rem;">
+                                    {% set judgingRun = run.0.judgingRuns.first %}
+                                    {% set judgeRunning = judgingRun == null or judgingRun.runresult == null %}
+
+                                    <span class="badge text-white {% if judgingRun != null and judgingRun.runresult == 'correct' %}bg_sol_correct{% elseif judgeRunning %}bg_sol_queued{% else %}bg_sol_incorrect{% endif %}">
+                                        {% if judgeRunning %}
+                                            ?
+                                        {% elseif judgingRun.runresult == 'correct' %}
+                                            ✓
+                                        {% else %}
+                                            {{ judgingRun.runresult | slice(0,1) }}
+                                        {% endif %}
+                                    </span>
+                                </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                {% endif %}
             </div>
         {% endif %}
 

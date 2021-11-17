@@ -42,24 +42,9 @@
                 </div>
                 {% if runs %}
                     <div class="p-2">
-                        Test Cases: 
+                        Testcase runs: 
                         <div class="d-inline-flex flex-row">
-                            {% for run in runs %}
-                                <div style="margin-left: .1rem; margin-right: .1rem;">
-                                    {% set judgingRun = run.0.judgingRuns.first %}
-                                    {% set judgeRunning = judgingRun == null or judgingRun.runresult == null %}
-
-                                    <span class="badge text-white {% if judgingRun != null and judgingRun.runresult == 'correct' %}bg_sol_correct{% elseif judgeRunning %}bg_sol_queued{% else %}bg_sol_incorrect{% endif %}">
-                                        {% if judgeRunning %}
-                                            ?
-                                        {% elseif judgingRun.runresult == 'correct' %}
-                                            ✓
-                                        {% else %}
-                                            {{ judgingRun.runresult | slice(0,1) }}
-                                        {% endif %}
-                                    </span>
-                                </div>
-                            {% endfor %}
+                            {{ runs | map(r => r.0) | displayTestcaseResults(judging and judging.endtime is not empty) }}
                         </div>
                     </div>
                 {% endif %}
@@ -86,11 +71,11 @@
             {% endif %}
         {% endif %}
 
-        {% if (showSampleOutput or showAllOutput != 0) and judging.result != 'compiler-error' %}
+        {% if showTestcaseResult != 0 and judging.result != 'compiler-error' and showResultDetail == 2 %}
             <hr/>
             <h4 class="text-center">
                 Run(s) on
-                {% if showSampleOutput and showAllOutput == 0 %}
+                {% if showTestcaseResult == 1 %}
                     the provided sample data
                 {% else %}
                     all data
@@ -130,27 +115,24 @@
                             </div>
                         </div>
 
-                        {% if (showSampleOutput and run.0.sample) or (showAllOutput == 2) %}
+                        {% if showResultDetail and run.0.sample %}
                             <h6 class="text-center">Program output</h6>
                             {% if run.output_run is not empty %}
-                                <pre class="output_text">
-    {{ run.output_run }}</pre>
+                                <pre class="output_text">{{ run.output_run }}</pre>
                             {% else %}
                                 <p class="nodata">There was no program output.</p>
                             {% endif %}
 
                             <h6 class="text-center">Diff output</h6>
                             {% if run.output_diff is not empty %}
-                                <pre class="output_text">
-    {{ run.output_diff }}</pre>
+                                <pre class="output_text">{{ run.output_diff }}</pre>
                             {% else %}
                                 <p class="nodata">There was no diff output.</p>
                             {% endif %}
 
                             <h6 class="text-center">Error output (info/debug/errors)</h6>
                             {% if run.output_error is not empty %}
-                                <pre class="output_text">
-    {{ run.output_error }}</pre>
+                                <pre class="output_text">{{ run.output_error }}</pre>
                             {% else %}
                                 <p class="nodata">There was no stderr output.</p>
                             {% endif %}
@@ -158,6 +140,6 @@
                     {% endif %}
                 {% endfor %}
             {% endif %} {# not runs is empty #}
-        {% endif %} {# showSampleOutput and judging.result != 'compiler-error' #}
+        {% endif %} {# showTestcaseResult != 0 and judging.result != 'compiler-error' and showResultDetail != 0 #}
     </div>
 {% endif %} {# not (judging is empty or judging.submission.submittime >= current_team_contest.endtime or (verificationRequired and not judging.verified)) #}

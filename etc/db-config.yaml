@@ -1,4 +1,4 @@
-# Configuration settings that can be overriden using the `configuration` database table
+# Configuration settings that can be overridden using the `configuration` database table
 -   category: Scoring
     description: Options related to how scoring is handled.
     items:
@@ -117,11 +117,6 @@
             default_value: 1048576
             public: false
             description: Minimum free disk space (in kB) on judgehosts.
-        -   name: update_judging_seconds
-            type: int
-            default_value: 5
-            public: false
-            description: Post updates to a judging every X seconds. Set to 0 to update after each judging_run.
         -   name: default_compare
             type: string
             default_value: compare
@@ -132,7 +127,22 @@
             default_value: run
             public: false
             description: The script used to run submissions if no special run script specified.
--   category: Clarification
+        -   name: default_full_debug
+            type: string
+            default_value: full_debug
+            public: false
+            description: The script used to compile a full debug package.
+        -   name: enable_parallel_judging
+            type: bool
+            default_value: true
+            public: false
+            description: Allows to distribute one judging to multiple judgehosts.
+        -   name: judgehost_activated_by_default
+            type: bool
+            default_value: true
+            public: false
+            description: Activate a judgehost by default when a new one registers.
+-   category: Clarifications
     description: Options related to clarifications.
     items:
         -   name: clar_categories
@@ -145,8 +155,8 @@
         -   name: clar_answers
             type: array_val
             default_value:
-                - No comment
-                - Read the problem statement carefully
+                - No comment.
+                - Read the problem statement carefully.
             public: false
             description: List of predefined clarification answers.
         -   name: clar_queues
@@ -171,7 +181,7 @@
             type: bool
             default_value: true
             public: true
-            description: Show country flags in the interfaces?
+            description: Show country information in the interfaces?
         -   name: show_affiliations
             type: bool
             default_value: true
@@ -253,7 +263,29 @@
             default_value: 0
             public: false
             description: Maximum width of team column on scoreboard. Leave 0 for no maximum.
--   category: Misc
+        -   name: show_public_stats
+            type: bool
+            default_value: true
+            public: true
+            description: Show submission and problem statistics on the team and public pages.
+-   category: Authentication
+    description: Options related to authentication.
+    items:
+        -   name: auth_methods
+            type: array_val
+            default_value: []
+            public: false
+            description: List of allowed additional authentication methods.
+            docdescription: See :ref:`authentication` for more information.
+            options:
+                - ipaddress
+                - xheaders
+        -   name: ip_autologin
+            type: bool
+            default_value: false
+            public: false
+            description: Enable to skip the login page when using IP authentication.
+-   category: External systems
     description: Miscellaneous configuration options.
     items:
         -   name: print_command
@@ -278,20 +310,9 @@
             public: false
             description: URL of a submission detail page on the external CCS. Placeholder [id] will be replaced by submission ID and [contest] by the contest ID. Leave empty to not display links to external CCS.
             docdescription: See :doc:`the chapter on running DOMjudge as a shadow system<shadow>` for more information.
--   category: Authentication
-    description: Options related to authentication.
-    items:
-        -   name: auth_methods
-            type: array_val
-            default_value: []
+        -   name: icat_url
+            type: string
+            default_value: ""
             public: false
-            description: List of allowed additional authentication methods.
-            docdescription: See :ref:`authentication` for more information.
-            options:
-                - ipaddress
-                - xheaders
-        -   name: ip_autologin
-            type: bool
-            default_value: false
-            public: false
-            description: Enable to skip the login page when using IP authentication.
+            description: URL of an ICPC iCAT instance if such is available; will be linked to from the submission verification box.
+            docdescription: See https://github.com/icpc-live/autoanalyst

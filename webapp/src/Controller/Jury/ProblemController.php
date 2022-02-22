@@ -6,12 +6,14 @@ use App\Controller\BaseController;
 use App\Entity\Contest;
 use App\Entity\ContestProblem;
 use App\Entity\Problem;
+use App\Entity\ProblemAttachment;
+use App\Entity\ProblemAttachmentContent;
 use App\Entity\Submission;
 use App\Entity\SubmissionFile;
 use App\Entity\Testcase;
 use App\Entity\TestcaseContent;
+use App\Form\Type\ProblemAttachmentType;
 use App\Form\Type\ProblemType;
-use App\Form\Type\ProblemUploadMultipleType;
 use App\Form\Type\ProblemUploadType;
 use App\Service\ConfigurationService;
 use App\Service\DOMJudgeService;
@@ -20,13 +22,16 @@ use App\Service\ImportProblemService;
 use App\Service\SubmissionService;
 use App\Utils\Utils;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\NonUniqueResultException;
+use Doctrine\ORM\NoResultException;
 use Doctrine\ORM\Query\Expr\Join;
 use Exception;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\IsGranted;
 use Symfony\Component\HttpFoundation\File\UploadedFile;
+use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpFoundation\StreamedResponse;
-use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\HttpKernel\Exception\ServiceUnavailableHttpException;
 use Symfony\Component\HttpKernel\KernelInterface;
@@ -34,7 +39,6 @@ use Symfony\Component\PropertyAccess\PropertyAccess;
 use Symfony\Component\Routing\Annotation\Route;
 use Symfony\Component\Yaml\Yaml;
 use ZipArchive;
-
 
 /**
  * @Route("/jury/problems")
@@ -77,17 +81,6 @@ class ProblemController extends BaseController
      */
     protected $importProblemService;
 
-    /**
-     * ProblemController constructor.
-     *
-     * @param EntityManagerInterface $em
-     * @param DOMJudgeService        $dj
-     * @param ConfigurationService   $config
-     * @param KernelInterface        $kernel
-     * @param EventLogService        $eventLogService
-     * @param SubmissionService      $submissionService
-     * @param ImportProblemService   $importProblemService
-     */
     public function __construct(
         EntityManagerInterface $em,
         DOMJudgeService $dj,
@@ -108,81 +101,10 @@ class ProblemController extends BaseController
 
     /**
      * @Route("", name="jury_problems")
-     * @param Request $request
-     * @return \Symfony\Component\HttpFoundation\Response
      * @throws Exception
      */
-    public function indexAction(Request $request)
+    public function indexAction(Request $request) : Response
     {
-        $formData = [
-            'contest' => $this->dj->getCurrentContest(),
-        ];
-        $form     = $this->createForm(ProblemUploadMultipleType::class, $formData);
-        $form->handleRequest($request);
-
-        if ($this->isGranted('ROLE_ADMIN') && $form->isSubmitted() && $form->isValid()) {
-            $formData = $form->getData();
-
-            /** @var UploadedFile[] $archives */
-            $archives = $formData['archives'];
-            /** @var Problem|null $newProblem */
-            $newProblem = null;
-            /** @var Contest|null $contest */
-            $contest = $formData['contest'] ?? null;
-            if ($contest === null) {
-                $contestId = null;
-            } else {
-                $contestId = $contest->getCid();
-            }
-            $allMessages = [];
-            foreach ($archives as $archive) {
-                try {
-                    $zip        = $this->dj->openZipFile($archive->getRealPath());
-                    $clientName = $archive->getClientOriginalName();
-                    $messages   = [];
-                    if ($contestId === null) {
-                        $contest = null;
-                    } else {
-                        $contest = $this->em->getRepository(Contest::class)->find($contestId);
-                    }
-                    $newProblem = $this->importProblemService->importZippedProblem(
-                        $zip, $clientName, null, $contest, $messages
-                    );
-                    $allMessages = array_merge($allMessages, $messages);
-                    if ($newProblem) {
-                        $this->dj->auditlog('problem', $newProblem->getProbid(), 'upload zip',
-                                            $clientName);
-                    } else {
-                        $message = '<ul>' . implode('', array_map(function (string $message) {
-                                return sprintf('<li>%s</li>', $message);
-                            }, $allMessages)) . '</ul>';
-                        $this->addFlash('danger', $message);
-                        return $this->redirectToRoute('jury_problems');
-                    }
-                } catch (Exception $e) {
-                    $allMessages[] = $e->getMessage();
-                } finally {
-                    if (isset($zip)) {
-                        $zip->close();
-                    }
-                }
-            }
-
-            if (!empty($allMessages)) {
-                $message = '<ul>' . implode('', array_map(function (string $message) {
-                        return sprintf('<li>%s</li>', $message);
-                    }, $allMessages)) . '</ul>';
-
-                $this->addFlash('info', $message);
-            }
-
-            if (count($archives) === 1 && $newProblem !== null) {
-                return $this->redirectToRoute('jury_problem', ['probId' => $newProblem->getProbid()]);
-            } else {
-                return $this->redirectToRoute('jury_problems');
-            }
-        }
-
         $problems = $this->em->createQueryBuilder()
             ->select('partial p.{probid,externalid,name,timelimit,memlimit,outputlimit}', 'COUNT(tc.testcaseid) AS testdatacount')
             ->from(Problem::class, 'p')
@@ -247,15 +169,15 @@ class ProblemController extends BaseController
             } else {
                 $problemactions[] = [];
             }
+            $problemactions[] = [
+                'icon' => 'save',
+                'title' => 'export problem as zip-file',
+                'link' => $this->generateUrl('jury_export_problem', [
+                    'problemId' => $p->getProbid(),
+                ])
+            ];
 
             if ($this->isGranted('ROLE_ADMIN')) {
-                $problemactions[] = [
-                    'icon' => 'save',
-                    'title' => 'export problem as zip-file',
-                    'link' => $this->generateUrl('jury_export_problem', [
-                        'problemId' => $p->getProbid(),
-                    ])
-                ];
                 $problemactions[] = [
                     'icon' => 'edit',
                     'title' => 'edit this problem',
@@ -305,28 +227,18 @@ class ProblemController extends BaseController
         $data = [
             'problems' => $problems_table,
             'table_fields' => $table_fields,
-            'num_actions' => $this->isGranted('ROLE_ADMIN') ? 4 : 1,
-            'form' => $form->createView(),
+            'num_actions' => $this->isGranted('ROLE_ADMIN') ? 4 : 2,
         ];
-
-        if ($this->isGranted('ROLE_ADMIN')) {
-            /** @var Contest[] $contests */
-            $contests                = $this->em->getRepository(Contest::class)->findAll();
-            $data['contests']        = $contests;
-            $data['current_contest'] = $this->dj->getCurrentContest();
-        }
 
         return $this->render('jury/problems.html.twig', $data);
     }
 
     /**
      * @Route("/{problemId<\d+>}/export", name="jury_export_problem")
-     * @IsGranted("ROLE_ADMIN")
-     * @param int $problemId
-     * @return StreamedResponse
-     * @throws \Doctrine\ORM\NonUniqueResultException
+     * @IsGranted("ROLE_JURY")
+     * @throws NonUniqueResultException
      */
-    public function exportAction(int $problemId)
+    public function exportAction(int $problemId) : StreamedResponse
     {
         // This might take a while
         ini_set('max_execution_time', '300');
@@ -347,8 +259,8 @@ class ProblemController extends BaseController
         // Build up INI
         $iniData = [
             'timelimit' => $problem->getTimelimit(),
-            'special_run' => $problem->getSpecialRun(),
-            'special_compare' => $problem->getSpecialCompare(),
+            'special_run' => $problem->getRunExecutable() ? $problem->getRunExecutable()->getExecid() : null,
+            'special_compare' => $problem->getCompareExecutable() ? $problem->getCompareExecutable()->getExecid() : null,
             'color' => $contestProblem ? $contestProblem->getColor() : null,
         ];
 
@@ -361,7 +273,7 @@ class ProblemController extends BaseController
 
         // Build up YAML
         $yaml = ['name' => $problem->getName()];
-        if (!empty($problem->getSpecialCompare())) {
+        if (!empty($problem->getCompareExecutable())) {
             $yaml['validation'] = 'custom';
         }
         if (!empty($problem->getSpecialCompareArgs())) {
@@ -403,7 +315,7 @@ class ProblemController extends BaseController
                 ->andWhere('t.sample = :sample')
                 ->setParameter(':problem', $problem)
                 ->setParameter(':sample', $isSample)
-                ->orderBy('t.rank')
+                ->orderBy('t.ranknumber')
                 ->getQuery()
                 ->getResult();
             $this->addTestcasesToZip($testcases, $zip, $isSample);
@@ -433,7 +345,7 @@ class ProblemController extends BaseController
             $problemResult = null;
 
             foreach (SubmissionService::PROBLEM_RESULT_REMAP as $key => $val) {
-                if (trim(mb_strtoupper($result)) == $val) {
+                if (trim(mb_strtoupper($result)) === $val) {
                     $problemResult = mb_strtolower($key);
                 }
             }
@@ -481,15 +393,11 @@ class ProblemController extends BaseController
 
     /**
      * @Route("/{probId<\d+>}", name="jury_problem")
-     * @param Request           $request
-     * @param SubmissionService $submissionService
-     * @param int               $probId
-     * @return \Symfony\Component\HttpFoundation\Response
-     * @throws \Doctrine\ORM\NoResultException
-     * @throws \Doctrine\ORM\NonUniqueResultException
+     * @throws NoResultException
+     * @throws NonUniqueResultException
      * @throws Exception
      */
-    public function viewAction(Request $request, SubmissionService $submissionService, int $probId)
+    public function viewAction(Request $request, SubmissionService $submissionService, int $probId) : Response
     {
         /** @var Problem $problem */
         $problem = $this->em->getRepository(Problem::class)->find($probId);
@@ -497,15 +405,52 @@ class ProblemController extends BaseController
             throw new NotFoundHttpException(sprintf('Problem with ID %s not found', $probId));
         }
 
+        $problemAttachmentForm = $this->createForm(ProblemAttachmentType::class);
+        $problemAttachmentForm->handleRequest($request);
+        if ($this->isGranted('ROLE_ADMIN') && $problemAttachmentForm->isSubmitted() && $problemAttachmentForm->isValid()) {
+            /** @var UploadedFile $file */
+            $file = $problemAttachmentForm->get('content')->getData();
+
+            if (!$file->isValid()) {
+                $this->addFlash('danger', sprintf('File upload error: %s. No changes made.', $file->getErrorMessage()));
+                return $this->redirectToRoute('jury_problem', ['probId' => $probId]);
+            }
+
+            $name = $file->getClientOriginalName();
+            $fileParts = explode('.', $name);
+            if (count($fileParts) > 0) {
+                $type = $fileParts[count($fileParts) - 1];
+            } else {
+                $type = 'txt';
+            }
+            $content = file_get_contents($file->getRealPath());
+
+            $attachmentContent = new ProblemAttachmentContent();
+            $attachmentContent->setContent($content);
+
+            $attachment = new ProblemAttachment();
+            $attachment
+                ->setProblem($problem)
+                ->setName($name)
+                ->setType($type)
+                ->setContent($attachmentContent);
+
+            $this->em->persist($attachment);
+            $this->em->flush();
+
+            return $this->redirectToRoute('jury_problem', ['probId' => $probId]);
+        }
+
         $restrictions = ['probid' => $problem->getProbid()];
         /** @var Submission[] $submissions */
-        list($submissions, $submissionCounts) = $submissionService->getSubmissionList(
+        [$submissions, $submissionCounts] = $submissionService->getSubmissionList(
             $this->dj->getCurrentContests(),
             $restrictions
         );
 
         $data = [
             'problem' => $problem,
+            'problemAttachmentForm' => $problemAttachmentForm->createView(),
             'submissions' => $submissions,
             'submissionCounts' => $submissionCounts,
             'defaultMemoryLimit' => (int)$this->config->get('memory_limit'),
@@ -513,7 +458,7 @@ class ProblemController extends BaseController
             'defaultRunExecutable' => (string)$this->config->get('default_run'),
             'defaultCompareExecutable' => (string)$this->config->get('default_compare'),
             'showContest' => count($this->dj->getCurrentContests()) > 1,
-            'showExternalResult' => $this->config->get('data_source') ==
+            'showExternalResult' => $this->config->get('data_source') ===
                 DOMJudgeService::DATA_SOURCE_CONFIGURATION_AND_LIVE_EXTERNAL,
             'refresh' => [
                 'after' => 15,
@@ -533,10 +478,8 @@ class ProblemController extends BaseController
 
     /**
      * @Route("/{probId<\d+>}/text", name="jury_problem_text")
-     * @param int $probId
-     * @return \Symfony\Component\HttpFoundation\Response
      */
-    public function viewTextAction(int $probId)
+    public function viewTextAction(int $probId): StreamedResponse
     {
         /** @var Problem $problem */
         $problem = $this->em->getRepository(Problem::class)->find($probId);
@@ -544,42 +487,14 @@ class ProblemController extends BaseController
             throw new NotFoundHttpException(sprintf('Problem with ID %s not found', $probId));
         }
 
-        switch ($problem->getProblemtextType()) {
-            case 'pdf':
-                $mimetype = 'application/pdf';
-                break;
-            case 'html':
-                $mimetype = 'text/html';
-                break;
-            case 'txt':
-                $mimetype = 'text/plain';
-                break;
-            default:
-                throw new BadRequestHttpException(sprintf('Problem p%d text has unknown type', $probId));
-        }
-
-        $filename    = sprintf('prob-%s.%s', $problem->getName(), $problem->getProblemtextType());
-        $problemText = stream_get_contents($problem->getProblemtext());
-
-        $response = new StreamedResponse();
-        $response->setCallback(function () use ($problemText) {
-            echo $problemText;
-        });
-        $response->headers->set('Content-Type', sprintf('%s; name="%s', $mimetype, $filename));
-        $response->headers->set('Content-Disposition', sprintf('inline; filename="%s"', $filename));
-        $response->headers->set('Content-Length', strlen($problemText));
-
-        return $response;
+        return $problem->getProblemTextStreamedResponse();
     }
 
     /**
      * @Route("/{probId<\d+>}/testcases", name="jury_problem_testcases")
-     * @param Request $request
-     * @param int     $probId
-     * @return \Symfony\Component\HttpFoundation\Response
      * @throws Exception
      */
-    public function testcasesAction(Request $request, int $probId)
+    public function testcasesAction(Request $request, int $probId) : Response
     {
         /** @var Problem $problem */
         $problem = $this->em->getRepository(Problem::class)->find($probId);
@@ -588,13 +503,13 @@ class ProblemController extends BaseController
         }
 
         $testcaseData = $this->em->createQueryBuilder()
-            ->from(Testcase::class, 'tc', 'tc.rank')
+            ->from(Testcase::class, 'tc', 'tc.ranknumber')
             ->join('tc.content', 'content')
             ->select('tc', 'LENGTH(content.input) AS input_size', 'LENGTH(content.output) AS output_size',
                      'LENGTH(content.image) AS image_size', 'tc.image_type')
             ->andWhere('tc.problem = :problem')
             ->setParameter(':problem', $problem)
-            ->orderBy('tc.rank')
+            ->orderBy('tc.ranknumber')
             ->getQuery()
             ->getResult();
 
@@ -638,7 +553,6 @@ class ProblemController extends BaseController
                             $thumb = Utils::getImageThumb($content, $thumbnailSize,
                                                           $this->dj->getDomjudgeTmpDir(), $error);
                             if ($thumb === false) {
-                                $thumb = null;
                                 $this->addFlash('danger', sprintf('image: %s', $error));
                                 return $this->redirectToRoute('jury_problem_testcases', ['probId' => $probId]);
                             }
@@ -652,7 +566,7 @@ class ProblemController extends BaseController
                             $md5Method     = sprintf('setMd5sum%s', ucfirst($type));
                             $testcase->getContent()->{$contentMethod}($content);
                             $testcase->{$md5Method}(md5($content));
-                            if ($type == 'input') {
+                            if ($type === 'input') {
                                 $testcase->setOrigInputFilename(basename($file->getClientOriginalName(), '.in'));
                             }
                         }
@@ -665,10 +579,10 @@ class ProblemController extends BaseController
                                            $file->getClientOriginalName(),
                                            Utils::printsize($file->getSize()));
 
-                        if ($type == 'output' && $file->getSize() > $outputLimit * 1024) {
+                        if ($type === 'output' && $file->getSize() > $outputLimit * 1024) {
                             $message .= sprintf(
-                                '<br><b>Warning: file size exceeds <code>output_limit</code> ' .
-                                'of %s kB. This will always result in wrong answers!</b>',
+                                "\nWarning: file size exceeds output_limit " .
+                                'of %s kB. This will always result in wrong answers!',
                                 $outputLimit
                             );
                         }
@@ -687,7 +601,7 @@ class ProblemController extends BaseController
             $allOk = true;
             $inputOrOutputSpecified = false;
             foreach (['input', 'output'] as $type) {
-                if ($file = $request->files->get('add_' . $type)) {
+                if ($request->files->get('add_' . $type)) {
                     $inputOrOutputSpecified = true;
                 }
             }
@@ -726,7 +640,7 @@ class ProblemController extends BaseController
                     $md5Method     = sprintf('setMd5sum%s', ucfirst($type));
                     $newTestcaseContent->{$contentMethod}($content);
                     $newTestcase->{$md5Method}(md5($content));
-                    if ($type == 'input') {
+                    if ($type === 'input') {
                         $newTestcase->setOrigInputFilename(basename($file->getClientOriginalName(), '.in'));
                     }
                 }
@@ -748,7 +662,6 @@ class ProblemController extends BaseController
                     $thumb = Utils::getImageThumb($content, $thumbnailSize,
                                                   $this->dj->getDomjudgeTmpDir(), $error);
                     if ($thumb === false) {
-                        $thumb = null;
                         $this->addFlash('danger', sprintf('image: %s', $error));
                         return $this->redirectToRoute('jury_problem_testcases', ['probId' => $probId]);
                     }
@@ -766,14 +679,14 @@ class ProblemController extends BaseController
                 $outFile = $request->files->get('add_output');
                 $message = sprintf(
                     'Added new testcase %d from files %s (%s) and %s (%s)', $maxrank,
-                    $inFile->getClientOriginalName(),  Utils::printsize($inFile->getSize()),
+                    $inFile->getClientOriginalName(), Utils::printsize($inFile->getSize()),
                     $outFile->getClientOriginalName(), Utils::printsize($outFile->getSize())
                 );
 
                 if (strlen($newTestcaseContent->getOutput()) > $outputLimit * 1024) {
                     $message .= sprintf(
-                        '<br><b>Warning: file size exceeds <code>output_limit</code> ' .
-                        'of %s kB. This will always result in wrong answers!</b>',
+                        "\nWarning: file size exceeds output_limit " .
+                        'of %s kB. This will always result in wrong answers!',
                         $outputLimit
                     );
                     $haswarnings = true;
@@ -781,7 +694,7 @@ class ProblemController extends BaseController
 
                 if (empty($newTestcaseContent->getInput()) ||
                     empty($newTestcaseContent->getOutput())) {
-                    $message .= '<br /><b>Warning: empty testcase file(s)!</b>';
+                    $message .= "\nWarning: empty testcase file(s)!\n";
                     $haswarnings = true;
                 }
 
@@ -791,13 +704,19 @@ class ProblemController extends BaseController
             $this->em->flush();
 
             if (!empty($messages)) {
-                $message = '<ul>' . implode('', array_map(function (string $message) {
-                        return sprintf('<li>%s</li>', $message);
-                    }, $messages)) . '</ul>';
-
-                $this->addFlash($haswarnings ? 'warning' : 'info', $message);
+                $this->addFlash($haswarnings ? 'warning' : 'info', implode("\n", $messages));
             }
             return $this->redirectToRoute('jury_problem_testcases', ['probId' => $probId]);
+        }
+
+        $known_md5s = [];
+        foreach ($testcases as $rank => $testcase) {
+            $input_md5 = $testcase->getMd5sumInput();
+            if (isset($known_md5s[$input_md5])) {
+                $this->addFlash('warning',
+                    "Testcase #" . $rank . " has identical input to testcase #" . $known_md5s[$input_md5] . '.');
+            }
+            $known_md5s[$input_md5] = $rank;
         }
 
         $data = [
@@ -814,12 +733,9 @@ class ProblemController extends BaseController
      *     "/{probId<\d+>}/testcases/{rank<\d+>}/move/{direction<up|down>}",
      *     name="jury_problem_testcase_move"
      *     )
-     * @param int    $probId
-     * @param int    $rank
-     * @param string $direction
-     * @return \Symfony\Component\HttpFoundation\Response
+     * @IsGranted("ROLE_ADMIN")
      */
-    public function moveTestcaseAction(int $probId, int $rank, string $direction)
+    public function moveTestcaseAction(int $probId, int $rank, string $direction) : Response
     {
         /** @var Problem $problem */
         $problem = $this->em->getRepository(Problem::class)->find($probId);
@@ -829,11 +745,11 @@ class ProblemController extends BaseController
 
         /** @var Testcase[] $testcases */
         $testcases = $this->em->createQueryBuilder()
-            ->from(Testcase::class, 'tc', 'tc.rank')
+            ->from(Testcase::class, 'tc', 'tc.ranknumber')
             ->select('tc')
             ->andWhere('tc.problem = :problem')
             ->setParameter(':problem', $problem)
-            ->orderBy('tc.rank')
+            ->orderBy('tc.ranknumber')
             ->getQuery()
             ->getResult();
 
@@ -848,14 +764,14 @@ class ProblemController extends BaseController
         $numTestcases = count($testcases);
 
         foreach ($testcases as $testcaseRank => $testcase) {
-            if ($testcaseRank == $rank) {
+            if ($testcaseRank === $rank) {
                 $current = $testcase;
             }
-            if ($testcaseRank == $rank && $direction == 'up') {
+            if ($testcaseRank === $rank && $direction === 'up') {
                 $other = $last;
                 break;
             }
-            if ($last !== null && $rank == $last->getRank() && $direction == 'down') {
+            if ($last !== null && $rank === $last->getRank() && $direction === 'down') {
                 $other = $testcase;
                 break;
             }
@@ -886,23 +802,19 @@ class ProblemController extends BaseController
      *     "/{probId<\d+>}/testcases/{rank<\d+>}/fetch/{type<input|output|image>}",
      *     name="jury_problem_testcase_fetch"
      *     )
-     * @param int    $probId
-     * @param int    $rank
-     * @param string $type
-     * @return \Symfony\Component\HttpFoundation\Response
-     * @throws \Doctrine\ORM\NonUniqueResultException
+     * @throws NonUniqueResultException
      */
-    public function fetchTestcaseAction(int $probId, int $rank, string $type)
+    public function fetchTestcaseAction(int $probId, int $rank, string $type) : Response
     {
         /** @var Testcase $testcase */
         $testcase = $this->em->createQueryBuilder()
             ->from(Testcase::class, 'tc')
             ->join('tc.content', 'tcc')
             ->select('tc', 'tcc')
-            ->andWhere('tc.probid = :problem')
-            ->andWhere('tc.rank = :rank')
+            ->andWhere('tc.problem = :problem')
+            ->andWhere('tc.ranknumber = :ranknumber')
             ->setParameter(':problem', $probId)
-            ->setParameter(':rank', $rank)
+            ->setParameter(':ranknumber', $rank)
             ->getQuery()
             ->getOneOrNullResult();
         if (!$testcase) {
@@ -912,12 +824,13 @@ class ProblemController extends BaseController
         if ($type === 'image') {
             $extension = $testcase->getImageType();
             $mimetype  = sprintf('image/%s', $extension);
+            $filename  = sprintf('p%d.t%d.%s', $probId, $rank, $extension);
         } else {
             $extension = substr($type, 0, -3);
             $mimetype  = 'text/plain';
+            $filename  = sprintf('%s.%s', $testcase->getDownloadName(), $extension);
         }
 
-        $filename = sprintf('p%d.t%d.%s', $probId, $rank, $extension);
         $content  = null;
 
         switch ($type) {
@@ -946,9 +859,7 @@ class ProblemController extends BaseController
     /**
      * @Route("/{probId<\d+>}/edit", name="jury_problem_edit")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @param int     $probId
-     * @return \Symfony\Component\HttpFoundation\RedirectResponse|\Symfony\Component\HttpFoundation\Response
+     * @return RedirectResponse|Response
      * @throws Exception
      */
     public function editAction(Request $request, int $probId)
@@ -997,10 +908,7 @@ class ProblemController extends BaseController
                 )) {
                     $this->dj->auditlog('problem', $problem->getProbid(), 'upload zip', $clientName);
                 } else {
-                    $message = '<ul>' . implode('', array_map(function (string $message) {
-                            return sprintf('<li>%s</li>', $message);
-                        }, $messages)) . '</ul>';
-                    $this->addFlash('danger', $message);
+                    $this->addFlash('danger', implode("\n", $messages));
                     return $this->redirectToRoute('jury_problem', ['probId' => $problem->getProbid()]);
                 }
             } catch (Exception $e) {
@@ -1012,11 +920,7 @@ class ProblemController extends BaseController
             }
 
             if (!empty($messages)) {
-                $message = '<ul>' . implode('', array_map(function (string $message) {
-                        return sprintf('<li>%s</li>', $message);
-                    }, $messages)) . '</ul>';
-
-                $this->addFlash('info', $message);
+                $this->addFlash('info', implode("\n", $messages));
             }
 
             return $this->redirectToRoute('jury_problem', ['probId' => $problem->getProbid()]);
@@ -1032,9 +936,7 @@ class ProblemController extends BaseController
     /**
      * @Route("/{probId<\d+>}/delete", name="jury_problem_delete")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @param int     $probId
-     * @return \Symfony\Component\HttpFoundation\RedirectResponse|\Symfony\Component\HttpFoundation\Response
+     * @return RedirectResponse|Response
      * @throws Exception
      */
     public function deleteAction(Request $request, int $probId)
@@ -1045,19 +947,50 @@ class ProblemController extends BaseController
             throw new NotFoundHttpException(sprintf('Problem with ID %s not found', $probId));
         }
 
-        return $this->deleteEntity($request, $this->em, $this->dj, $this->eventLogService, $this->kernel,
-                                   $problem, $problem->getName(), $this->generateUrl('jury_problems'));
+        return $this->deleteEntities($request, $this->em, $this->dj, $this->eventLogService, $this->kernel,
+                                     [$problem], $this->generateUrl('jury_problems'));
+    }
+
+    /**
+     * @Route("/attachments/{attachmentId<\d+>}", name="jury_attachment_fetch")
+     */
+    public function fetchAttachmentAction(int $attachmentId): StreamedResponse
+    {
+        /** @var ProblemAttachment $attachment */
+        $attachment = $this->em->getRepository(ProblemAttachment::class)->find($attachmentId);
+        if (!$attachment) {
+            throw new NotFoundHttpException(sprintf('Attachment with ID %s not found',
+                $attachmentId));
+        }
+
+        return $attachment->getStreamedResponse();
+    }
+
+    /**
+     * @Route("/attachments/{attachmentId<\d+>}/delete", name="jury_attachment_delete")
+     * @IsGranted("ROLE_ADMIN")
+     * @throws Exception
+     */
+    public function deleteAttachmentAction(Request $request, int $attachmentId): Response
+    {
+        /** @var ProblemAttachment $attachment */
+        $attachment = $this->em->getRepository(ProblemAttachment::class)->find($attachmentId);
+        if (!$attachment) {
+            throw new NotFoundHttpException(sprintf('Attachment with ID %s not found', $attachmentId));
+        }
+
+        $probId = $attachment->getProblem()->getProbid();
+
+        return $this->deleteEntities($request, $this->em, $this->dj, $this->eventLogService, $this->kernel,
+                                     [$attachment], $this->generateUrl('jury_problem', ['probId' => $probId]));
     }
 
     /**
      * @Route("/{testcaseId<\d+>}/delete_testcase", name="jury_testcase_delete")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @param int     $probId
-     * @return \Symfony\Component\HttpFoundation\RedirectResponse|\Symfony\Component\HttpFoundation\Response
      * @throws Exception
      */
-    public function deleteTestcaseAction(Request $request, int $testcaseId)
+    public function deleteTestcaseAction(Request $request, int $testcaseId): Response
     {
         /** @var Testcase $testcase */
         $testcase = $this->em->getRepository(Testcase::class)->find($testcaseId);
@@ -1065,31 +998,29 @@ class ProblemController extends BaseController
             throw new NotFoundHttpException(sprintf('Testcase with ID %s not found', $testcaseId));
         }
         $testcase->setDeleted(true);
-        $probId = $testcase->getProbid();
-        $testcase->setProbid(null);
+        $problem = $testcase->getProblem();
+        $testcase->setProblem(null);
         $oldRank = $testcase->getRank();
 
         /** @var Testcase[] $testcases */
         $testcases = $this->em->getRepository(Testcase::class)
-            ->findBy(['probid' => $probId], ['rank' => 'ASC']);
+            ->findBy(['problem' => $problem], ['ranknumber' => 'ASC']);
         foreach ($testcases as $testcase) {
             if ($testcase->getRank() > $oldRank) {
                 $testcase->setRank($testcase->getRank() - 1);
             }
         }
         $this->em->flush();
-        $this->addFlash('danger', sprintf('Testcase %d removed from problem %s. Consider rejudging the problem.', $testcaseId, $probId));
-        return $this->redirectToRoute('jury_problem_testcases', ['probId' => $probId]);
+        $this->addFlash('danger', sprintf('Testcase %d removed from problem %s. Consider rejudging the problem.', $testcaseId, $problem->getProbid()));
+        return $this->redirectToRoute('jury_problem_testcases', ['probId' => $problem->getProbid()]);
     }
 
     /**
      * @Route("/add", name="jury_problem_add")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @return \Symfony\Component\HttpFoundation\Response
      * @throws Exception
      */
-    public function addAction(Request $request)
+    public function addAction(Request $request) : Response
     {
         $problem = new Problem();
 
@@ -1099,8 +1030,7 @@ class ProblemController extends BaseController
 
         if ($form->isSubmitted() && $form->isValid()) {
             $this->em->persist($problem);
-            $this->saveEntity($this->em, $this->eventLogService, $this->dj, $problem,
-                              $problem->getProbid(), true);
+            $this->saveEntity($this->em, $this->eventLogService, $this->dj, $problem, null, true);
             return $this->redirect($this->generateUrl(
                 'jury_problem',
                 ['probId' => $problem->getProbid()]
@@ -1112,11 +1042,7 @@ class ProblemController extends BaseController
         ]);
     }
 
-    /**
-     * @param Testcase[] $testcases
-     * @param ZipArchive $zip
-     */
-    public function addTestcasesToZip(array $testcases, ZipArchive $zip, bool $isSample)
+    private function addTestcasesToZip(array $testcases, ZipArchive $zip, bool $isSample): void
     {
         $formatString = sprintf('data/%%s/%%0%dd', ceil(log10(count($testcases) + 1)));
         $rankInGroup = 0;

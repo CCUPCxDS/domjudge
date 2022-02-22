@@ -104,7 +104,6 @@ class DOMJudgeXHeadersAuthenticator extends AbstractGuardAuthenticator
         if ($request->attributes->get('_route') === 'login'
             && $request->isMethod('POST')
             && $request->request->get('loginmethod') === 'xheaders') {
-
             // Use target URL from session if set
             if ($providerKey !== null &&
                 $targetUrl = $this->getTargetPath($request->getSession(), $providerKey)) {
@@ -127,9 +126,7 @@ class DOMJudgeXHeadersAuthenticator extends AbstractGuardAuthenticator
      */
     public function start(Request $request, AuthenticationException $authException = null)
     {
-        $data = array(
-            'message' => 'Authentication Required'
-        );
+        $data = ['message' => 'Authentication Required'];
 
         return new JsonResponse($data, Response::HTTP_UNAUTHORIZED);
     }

@@ -7,17 +7,20 @@ use App\Entity\Judgehost;
 use App\Entity\Language;
 use App\Entity\Problem;
 use App\Entity\Team;
+use App\Entity\User;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\EntityRepository;
 use Symfony\Bridge\Doctrine\Form\Type\EntityType;
 use Symfony\Component\Form\AbstractType;
 use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
+use Symfony\Component\Form\Extension\Core\Type\IntegerType;
 use Symfony\Component\Form\Extension\Core\Type\SubmitType;
 use Symfony\Component\Form\Extension\Core\Type\TextType;
 use Symfony\Component\Form\FormBuilderInterface;
 use Symfony\Component\Form\FormEvent;
 use Symfony\Component\Form\FormEvents;
 use Symfony\Component\Form\FormInterface;
+use Symfony\Component\Validator\Constraints\Regex;
 
 class RejudgingType extends AbstractType
 {
@@ -43,6 +46,21 @@ class RejudgingType extends AbstractType
     public function buildForm(FormBuilderInterface $builder, array $options)
     {
         $builder->add('reason', TextType::class);
+        $builder->add('priority', ChoiceType::class,
+            [
+                'choices' => [
+                    'low' => 'low',
+                    'default' => 'default',
+                    'high' => 'high',
+                ],
+                'data' => 'default',
+            ]
+        );
+        $builder->add('repeat', IntegerType::class, [
+            'label' => 'Number of times to repeat this rejudging',
+            'data' => 1,
+            'attr' => ['min' => 1, 'max' => 99]
+        ]);
         $builder->add('contests', EntityType::class, [
             'label' => 'Contest',
             'class' => Contest::class,
@@ -85,6 +103,19 @@ class RejudgingType extends AbstractType
             'choice_label' => 'name',
             'choices' => [],
         ]);
+        $builder->add('users', EntityType::class, [
+            'label' => 'User',
+            'class' => User::class,
+            'required' => false,
+            'multiple' => true,
+            'choice_label' => 'name',
+            'query_builder' => function (EntityRepository $er) {
+                return $er
+                    ->createQueryBuilder('u')
+                    ->where('u.enabled = 1')
+                    ->orderBy('u.name');
+            },
+        ]);
         $builder->add('judgehosts', EntityType::class, [
             'multiple' => true,
             'label' => 'Judgehost',
@@ -113,13 +144,23 @@ class RejudgingType extends AbstractType
             'required' => false,
             'choices' => array_combine($verdicts, $verdicts),
         ]);
-        $builder->add('before', TextType::class, [
-            'label' => 'before (in form ±[HHH]H:MM[:SS[.uuuuuu]])',
-            'required' => false,
-        ]);
+        $relativeTimeConstraints = [
+            new Regex([
+                'pattern' => '/^[+-][0-9]+:[0-9]{2}(:[0-9]{2}(\.[0-9]{0,6})?)?$/',
+                'message' => 'Invalid relative time format'
+            ])
+        ];
         $builder->add('after', TextType::class, [
-            'label' => 'after (in form ±[HHH]H:MM[:SS[.uuuuuu]])',
+            'label' => 'after',
             'required' => false,
+            'constraints' => $relativeTimeConstraints,
+            'help' => 'in form ±[HHH]H:MM[:SS[.uuuuuu]], contest relative time',
+        ]);
+        $builder->add('before', TextType::class, [
+            'label' => 'before',
+            'required' => false,
+            'constraints' => $relativeTimeConstraints,
+            'help' => 'in form ±[HHH]H:MM[:SS[.uuuuuu]], contest relative time',
         ]);
 
         $builder->add('save', SubmitType::class);

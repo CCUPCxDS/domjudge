@@ -5,14 +5,18 @@ namespace App\Controller\Jury;
 use App\Controller\BaseController;
 use App\Entity\TeamAffiliation;
 use App\Form\Type\TeamAffiliationType;
+use App\Service\AssetUpdateService;
 use App\Service\ConfigurationService;
 use App\Service\DOMJudgeService;
 use App\Service\EventLogService;
 use App\Service\ScoreboardService;
 use Doctrine\ORM\EntityManagerInterface;
+use Exception;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\IsGranted;
 use Symfony\Component\Asset\Packages;
+use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\HttpKernel\KernelInterface;
 use Symfony\Component\PropertyAccess\PropertyAccess;
@@ -50,32 +54,30 @@ class TeamAffiliationController extends BaseController
     protected $eventLogService;
 
     /**
-     * TeamCategoryController constructor.
-     *
-     * @param EntityManagerInterface $em
-     * @param DOMJudgeService        $dj
-     * @param ConfigurationService   $config
-     * @param KernelInterface        $kernel
-     * @param EventLogService        $eventLogService
+     * @var AssetUpdateService
      */
+    protected $assetUpdater;
+
     public function __construct(
         EntityManagerInterface $em,
         DOMJudgeService $dj,
         ConfigurationService $config,
         KernelInterface $kernel,
-        EventLogService $eventLogService
+        EventLogService $eventLogService,
+        AssetUpdateService $assetUpdater
     ) {
         $this->em              = $em;
         $this->dj              = $dj;
         $this->config          = $config;
         $this->kernel          = $kernel;
         $this->eventLogService = $eventLogService;
+        $this->assetUpdater    = $assetUpdater;
     }
 
     /**
      * @Route("", name="jury_team_affiliations")
      */
-    public function indexAction(Request $request, Packages $assetPackage, string $projectDir)
+    public function indexAction(Request $request, Packages $assetPackage, string $projectDir): Response
     {
         $em               = $this->em;
         $teamAffiliations = $em->createQueryBuilder()
@@ -96,7 +98,7 @@ class TeamAffiliationController extends BaseController
 
         if ($showFlags) {
             $table_fields['country'] = ['title' => 'country', 'sort' => true];
-            $table_fields['logo'] = ['title' => 'logo', 'sort' => false];
+            $table_fields['affiliation_logo'] = ['title' => 'logo', 'sort' => false];
         }
 
         $table_fields['num_teams'] = ['title' => '# teams', 'sort' => true];
@@ -145,28 +147,14 @@ class TeamAffiliationController extends BaseController
             $affiliationdata['num_teams'] = ['value' => $teamAffiliationData['num_teams']];
             if ($showFlags) {
                 $countryCode     = $teamAffiliation->getCountry();
-                $countryFlag     = $countryCode;
-                $countryFlagPath = sprintf('images/countries/%s.png', $countryCode);
-                if (file_exists($webDir . '/' . $countryFlagPath)) {
-                    $countryFlag = sprintf('<img src="%s" alt="%s" class="countryflag">',
-                                           $assetPackage->getUrl($countryFlagPath), $countryCode);
-                }
                 $affiliationdata['country'] = [
-                    'value' => $countryFlag,
+                    'value' => $countryCode,
                     'sortvalue' => $countryCode,
-                    'title' => $countryCode,
                 ];
             }
 
-            $organizationFilePath = sprintf('images/affiliations/%s.png', $teamAffiliation->getExternalid() ?? $teamAffiliation->getAffilid());
-            $affiliationLogo = '';
-            if (file_exists($webDir . '/' . $organizationFilePath)) {
-                $affiliationLogo = sprintf('<img src="%s" alt="%s" class="affiliation-logo">',
-                    $assetPackage->getUrl($organizationFilePath), $teamAffiliation->getShortname());
-            }
-
-            $affiliationdata['logo'] = [
-                'value' => $affiliationLogo,
+            $affiliationdata['affiliation_logo'] = [
+                'value' => $teamAffiliation->getExternalid() ?? $teamAffiliation->getAffilid(),
                 'title' => $teamAffiliation->getShortname(),
             ];
 
@@ -186,13 +174,9 @@ class TeamAffiliationController extends BaseController
 
     /**
      * @Route("/{affilId<\d+>}", name="jury_team_affiliation")
-     * @param Request           $request
-     * @param ScoreboardService $scoreboardService
-     * @param int               $affilId
-     * @return \Symfony\Component\HttpFoundation\Response
-     * @throws \Exception
+     * @throws Exception
      */
-    public function viewAction(Request $request, ScoreboardService $scoreboardService, int $affilId)
+    public function viewAction(Request $request, ScoreboardService $scoreboardService, int $affilId) : Response
     {
         /** @var TeamAffiliation $teamAffiliation */
         $teamAffiliation = $this->em->getRepository(TeamAffiliation::class)->find($affilId);
@@ -233,10 +217,8 @@ class TeamAffiliationController extends BaseController
     /**
      * @Route("/{affilId<\d+>}/edit", name="jury_team_affiliation_edit")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @param int     $affilId
-     * @return \Symfony\Component\HttpFoundation\RedirectResponse|\Symfony\Component\HttpFoundation\Response
-     * @throws \Exception
+     * @return RedirectResponse|Response
+     * @throws Exception
      */
     public function editAction(Request $request, int $affilId)
     {
@@ -251,6 +233,7 @@ class TeamAffiliationController extends BaseController
         $form->handleRequest($request);
 
         if ($form->isSubmitted() && $form->isValid()) {
+            $this->assetUpdater->updateAssets($teamAffiliation);
             $this->saveEntity($this->em, $this->eventLogService, $this->dj, $teamAffiliation,
                               $teamAffiliation->getAffilid(), false);
             return $this->redirect($this->generateUrl(
@@ -268,10 +251,8 @@ class TeamAffiliationController extends BaseController
     /**
      * @Route("/{affilId<\d+>}/delete", name="jury_team_affiliation_delete")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @param int     $affilId
-     * @return \Symfony\Component\HttpFoundation\RedirectResponse|\Symfony\Component\HttpFoundation\Response
-     * @throws \Exception
+     * @return RedirectResponse|Response
+     * @throws Exception
      */
     public function deleteAction(Request $request, int $affilId)
     {
@@ -281,18 +262,17 @@ class TeamAffiliationController extends BaseController
             throw new NotFoundHttpException(sprintf('Team affiliation with ID %s not found', $affilId));
         }
 
-        return $this->deleteEntity($request, $this->em, $this->dj, $this->eventLogService, $this->kernel,
-                                   $teamAffiliation, $teamAffiliation->getName(), $this->generateUrl('jury_team_affiliations'));
+        return $this->deleteEntities($request, $this->em, $this->dj, $this->eventLogService, $this->kernel,
+                                     [$teamAffiliation], $this->generateUrl('jury_team_affiliations'));
     }
 
     /**
      * @Route("/add", name="jury_team_affiliation_add")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @return \Symfony\Component\HttpFoundation\Response
-     * @throws \Exception
+     * @return Response
+     * @throws Exception
      */
-    public function addAction(Request $request)
+    public function addAction(Request $request) : Response
     {
         $teamAffiliation = new TeamAffiliation();
 
@@ -302,8 +282,8 @@ class TeamAffiliationController extends BaseController
 
         if ($form->isSubmitted() && $form->isValid()) {
             $this->em->persist($teamAffiliation);
-            $this->saveEntity($this->em, $this->eventLogService, $this->dj, $teamAffiliation,
-                              $teamAffiliation->getAffilid(), true);
+            $this->assetUpdater->updateAssets($teamAffiliation);
+            $this->saveEntity($this->em, $this->eventLogService, $this->dj, $teamAffiliation, null, true);
             return $this->redirect($this->generateUrl(
                 'jury_team_affiliation',
                 ['affilId' => $teamAffiliation->getAffilid()]

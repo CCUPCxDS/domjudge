@@ -3,7 +3,6 @@
 namespace App\Form\Type;
 
 use App\Entity\Judgehost;
-use App\Entity\JudgehostRestriction;
 use Symfony\Bridge\Doctrine\Form\Type\EntityType;
 use Symfony\Component\Form\AbstractType;
 use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
@@ -24,12 +23,11 @@ class JudgehostType extends AbstractType
                 'no' => false,
             ],
         ]);
-        $builder->add('restriction', EntityType::class, [
-            'class' => JudgehostRestriction::class,
-            'choice_label' => 'name',
-            'required' => false,
-            'placeholder' => '-- no restrictions --',
-            'label' => 'Restrictions',
+        $builder->add('hidden', ChoiceType::class, [
+            'choices' => [
+                'yes' => true,
+                'no' => false,
+            ],
         ]);
     }
 

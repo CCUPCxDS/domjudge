@@ -5,14 +5,21 @@ namespace App\Service;
 use App\Entity\Contest;
 use App\Entity\ContestProblem;
 use App\Entity\Executable;
+use App\Entity\ImmutableExecutable;
 use App\Entity\Language;
 use App\Entity\Problem;
+use App\Entity\ProblemAttachment;
+use App\Entity\ProblemAttachmentContent;
 use App\Entity\Submission;
 use App\Entity\Team;
 use App\Entity\Testcase;
 use App\Entity\TestcaseContent;
 use App\Utils\Utils;
+use Doctrine\DBAL\DBALException;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\NonUniqueResultException;
+use Doctrine\ORM\NoResultException;
+use InvalidArgumentException;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpFoundation\File\UploadedFile;
 use Symfony\Component\HttpKernel\Exception\ServiceUnavailableHttpException;
@@ -89,9 +96,9 @@ class ImportProblemService
      * @param Contest|null $contest
      * @param array        $messages
      * @return Problem|null
-     * @throws \Doctrine\DBAL\DBALException
-     * @throws \Doctrine\ORM\NoResultException
-     * @throws \Doctrine\ORM\NonUniqueResultException
+     * @throws DBALException
+     * @throws NoResultException
+     * @throws NonUniqueResultException
      */
     public function importZippedProblem(
         ZipArchive $zip,
@@ -107,7 +114,7 @@ class ImportProblemService
         $yamlFile        = 'problem.yaml';
         $tleFile         = '.timelimit';
         $submission_file = 'submissions.json';
-        $problemIsNew   = $problem === null;
+        $problemIsNew    = $problem === null;
 
         $iniKeysProblem        = ['name', 'timelimit', 'special_run', 'special_compare'];
         $iniKeysContestProblem = ['allow_submit', 'allow_judge', 'points', 'color'];
@@ -116,7 +123,16 @@ class ImportProblemService
 
         // Read problem properties
         $propertiesString = $zip->getFromName($propertiesFile);
-        $properties       = $propertiesString === false ? [] : parse_ini_string($propertiesString);
+        $properties = [];
+
+        if ($propertiesString !== false) {
+            $tryParseProperties = parse_ini_string($propertiesString);
+            if (is_array($tryParseProperties)) {
+                $properties = $tryParseProperties;
+            } else {
+                $messages[] = "The given domjudge-problem.ini is invalid, ignoring.";
+            }
+        }
 
         // Only preserve valid keys:
         $problemProperties        = array_intersect_key($properties, array_flip($iniKeysProblem));
@@ -338,11 +354,18 @@ class ImportProblemService
                             }
 
                             $combinedRunCompare = $yamlData['validation'] == 'custom interactive';
+
+                            if (!($tempzipFile = tempnam($this->dj->getDomjudgeTmpDir(), "/executable-"))) {
+                                throw new ServiceUnavailableHttpException(null, 'Failed to create temporary file');
+                            }
+                            file_put_contents($tempzipFile, $outputValidatorZip);
+                            $zipArchive = new ZipArchive();
+                            $zipArchive->open($tempzipFile);
+
                             $executable         = new Executable();
                             $executable
                                 ->setExecid($outputValidatorName)
-                                ->setMd5sum(md5($outputValidatorZip))
-                                ->setZipfile($outputValidatorZip)
+                                ->setImmutableExecutable($this->dj->createImmutableExecutable($zipArchive))
                                 ->setDescription(sprintf('output validator for %s', $problem->getName()))
                                 ->setType($combinedRunCompare ? 'run' : 'compare');
                             $this->em->persist($executable);
@@ -383,7 +406,7 @@ class ImportProblemService
                     $problem
                         ->setProblemtext($text)
                         ->setProblemtextType($type);
-                    $messages[] = "Added problem statement from: <tt>$filename</tt>";
+                    $messages[] = "Added problem statement from: $filename";
                     break;
                 }
             }
@@ -394,7 +417,7 @@ class ImportProblemService
             // Find the current max rank
             $maxRank = (int)$this->em->createQueryBuilder()
                 ->from(Testcase::class, 't')
-                ->select('MAX(t.rank)')
+                ->select('MAX(t.ranknumber)')
                 ->andWhere('t.problem = :problem')
                 ->setParameter(':problem', $problem)
                 ->getQuery()
@@ -426,9 +449,9 @@ class ImportProblemService
             asort($dataFiles);
 
             foreach ($dataFiles as $dataFile) {
-                $testIn      = $zip->getFromName(sprintf('data/%s/%s.in', $type, $dataFile));
-                $testOut     = $zip->getFromName(sprintf('data/%s/%s.ans', $type, $dataFile));
-                $imageFile = $imageType = $imageThumb = false;
+                $testInput  = $zip->getFromName(sprintf('data/%s/%s.in', $type, $dataFile));
+                $testOutput = $zip->getFromName(sprintf('data/%s/%s.ans', $type, $dataFile));
+                $imageFile  = $imageType = $imageThumb = false;
                 foreach (['png', 'jpg', 'jpeg', 'gif'] as $imgExtension) {
                     $imageFileName = sprintf('data/%s/%s.%s', $type, $dataFile, $imgExtension);
                     if (($imageFile = $zip->getFromName($imageFileName)) !== false) {
@@ -456,8 +479,8 @@ class ImportProblemService
                     }
                 }
 
-                $md5in  = md5($testIn);
-                $md5out = md5($testOut);
+                $md5in  = md5($testInput);
+                $md5out = md5($testOutput);
 
                 if ($problem->getProbid()) {
                     // Skip testcases that already exist identically
@@ -479,7 +502,7 @@ class ImportProblemService
                         ->getOneOrNullResult();
 
                     if (isset($existingTestcase)) {
-                        $messages[] = sprintf('Skipped %s testcase <tt>%s</tt>: already exists', $type, $dataFile);
+                        $messages[] = sprintf('Skipped %s testcase %s: already exists', $type, $dataFile);
                         continue;
                     }
                 }
@@ -495,8 +518,8 @@ class ImportProblemService
                     ->setMd5sumOutput($md5out)
                     ->setOrigInputFilename($dataFile);
                 $testcaseContent
-                    ->setInput($testIn)
-                    ->setOutput($testOut);
+                    ->setInput($testInput)
+                    ->setOutput($testOutput);
                 if (($descriptionFile = $zip->getFromName(sprintf('data/%s/%s.desc', $type, $dataFile))) !== false) {
                     $testcase->setDescription($descriptionFile);
                 }
@@ -512,11 +535,76 @@ class ImportProblemService
                 $numCases++;
 
                 $testcases[] = $testcase;
-
-                $messages[] = sprintf('Added %s testcase from: <tt>%s.{in,ans}</tt>', $type, $dataFile);
             }
-            $messages[] = sprintf("Added %d %s testcase(s).", $numCases, $type);
+            if ($numCases > 0) {
+                $messages[] = sprintf("Added %d %s testcase(s): {%s}.{in,ans}",
+                    $numCases, $type, join(',', $dataFiles));
+            }
         }
+
+        $numAttachments = 0;
+        for ($j = 0; $j < $zip->numFiles; $j++) {
+            $filename = $zip->getNameIndex($j);
+            if (!Utils::startsWith($filename, 'attachments/')) {
+                continue;
+            }
+
+            $content = $zip->getFromName($filename);
+            if (empty($content)) {
+                // Empty file or directory, ignore
+                continue;
+            }
+
+            $name = basename($filename);
+
+            $fileParts = explode('.', $name);
+            if (count($fileParts) > 0) {
+                $type = $fileParts[count($fileParts) - 1];
+            } else {
+                $type = 'txt';
+            }
+
+            // Check if an attachment already exists, since then we overwrite it
+            if ($problem->getProbid()) {
+                /** @var ProblemAttachment|null $attachment */
+                $attachment = $this->em
+                    ->createQueryBuilder()
+                    ->from(ProblemAttachment::class, 'a')
+                    ->select('a')
+                    ->andWhere('a.name = :name')
+                    ->andWhere('a.problem = :problem')
+                    ->setParameter(':name', $name)
+                    ->setParameter(':problem', $problem)
+                    ->getQuery()
+                    ->getOneOrNullResult();
+            } else {
+                $attachment = null;
+            }
+
+            if ($attachment) {
+                $attachmentContent = $attachment->getContent();
+                $attachmentContent->setContent($content);
+
+                $messages[] = sprintf("Updated attachment '%s'", $name);
+            } else {
+                $attachment = new ProblemAttachment();
+                $attachmentContent = new ProblemAttachmentContent();
+                $attachment
+                    ->setProblem($problem)
+                    ->setName($name)
+                    ->setType($type)
+                    ->setContent($attachmentContent);
+
+                $attachmentContent->setContent($content);
+
+                $this->em->persist($attachment);
+
+                $messages[] = sprintf("Added attachment '%s'", $name);
+            }
+
+            $numAttachments++;
+        }
+        $messages[] = sprintf("Added/updated %d attachment(s).", $numAttachments);
 
         $this->em->persist($problem);
         $this->em->flush();
@@ -524,11 +612,11 @@ class ImportProblemService
             $contestProblem->setProblem($problem);
             $contestProblem->setContest($contest);
             $this->em->persist($contestProblem);
+            $this->em->flush();
         }
 
-        $this->em->flush();
-
         $cid = $contest ? $contest->getCid() : null;
+        $probid = $problem->getProbid();
         $this->eventLogService->log('problem', $problem->getProbid(), $problemIsNew ? 'create' : 'update', $cid);
 
         foreach ($testcases as $testcase) {
@@ -541,6 +629,17 @@ class ImportProblemService
         } elseif (!$this->dj->getUser()->getTeam()) {
             $messages[] = 'No jury solutions added: must associate team with your user first.';
         } elseif ($contestProblem->getAllowSubmit()) {
+            $subs_with_unknown_lang = [];
+            $too_large_subs = [];
+            $successful_subs = [];
+
+            // As EventLogService::log() will clear the entity manager, the problem and the contest became detached. We
+            // need to reload them.
+            // We seem to need to explicitly clear the EntityManager, otherwise we will receive inconsistent data.
+            $this->em->clear();
+            $problem = $this->em->getRepository(Problem::class)->find($probid);
+            $contest = $this->em->getRepository(Contest::class)->find($cid);
+
             // First find all submittable languages:
             /** @var Language[] $allowedLanguages */
             $allowedLanguages = $this->em->createQueryBuilder()
@@ -552,7 +651,7 @@ class ImportProblemService
 
             // Read submission details from optional file.
             $submission_file_string = $zip->getFromName($submission_file);
-            $submission_details = $submission_file_string===FALSE ? array() :
+            $submission_details = $submission_file_string===false ? [] :
                 $this->dj->jsonDecode($submission_file_string);
 
             $numJurySolutions = 0;
@@ -612,7 +711,7 @@ class ImportProblemService
                 $tmpDir = $this->dj->getDomjudgeTmpDir();
 
                 if (empty($languageToUse)) {
-                    $messages[] = "Could not add jury solution <tt>$path</tt>: unknown language.";
+                    $subs_with_unknown_lang[] = "'" . $path . "'";
                 } else {
                     $expectedResult = SubmissionService::normalizeExpectedResult($pathComponents[1]);
                     $results        = null;
@@ -647,14 +746,19 @@ class ImportProblemService
                     } elseif (!empty($expectedResult)) {
                         $results = [$expectedResult];
                     }
-                    $jury_team_id = $this->dj->getUser()->getTeamid();
+                    $jury_team_id = $this->dj->getUser()->getTeam() ? $this->dj->getUser()->getTeam()->getTeamid() : null;
+                    $jury_user = $this->dj->getUser();
                     if (isset($submission_details[$path]['team'])) {
+                        /** @var Team|null $json_team */
                         $json_team = $this->em->getRepository(Team::class)
                             ->findOneBy(['name' => $submission_details[$path]['team']]);
                         if (isset($json_team)) {
                             $json_team_id = $json_team->getTeamid();
                             if (isset($json_team_id)) {
                                 $jury_team_id = $json_team_id;
+                                if (!$json_team->getUsers()->isEmpty()) {
+                                    $jury_user = $json_team->getUsers()->first();
+                                }
                             }
                         }
                     }
@@ -663,8 +767,7 @@ class ImportProblemService
                         $entry_point = $submission_details[$path]['entry_point'];
                     }
                     if ($totalSize <= $this->config->get('sourcesize_limit') * 1024) {
-                        $contest        = $this->em->getRepository(Contest::class)->find(
-                            $contest->getCid());
+                        $contest        = $this->em->getRepository(Contest::class)->find($contest->getCid());
                         $team           = $this->em->getRepository(Team::class)->find($jury_team_id);
                         $contestProblem = $this->em->getRepository(ContestProblem::class)->find(
                             [
@@ -673,7 +776,7 @@ class ImportProblemService
                             ]
                         );
                         $submission     = $this->submissionService->submitSolution(
-                            $team, $contestProblem, $contest, $languageToUse, $filesToSubmit,
+                            $team, $jury_user, $contestProblem, $contest, $languageToUse, $filesToSubmit, 'problem import', null,
                             null, $entry_point, null, null, $submissionMessage
                         );
 
@@ -686,10 +789,10 @@ class ImportProblemService
                         // Flush changes to submission
                         $this->em->flush();
 
-                        $messages[] = "Added jury solution from: <tt>$path</tt></li>";
+                        $successful_subs[] = "'" . $path . "'";
                         $numJurySolutions++;
                     } else {
-                        $messages[] = "Could not add jury solution <tt>$path</tt>: too large.";
+                        $too_large_subs[] = "'" . $path . "'";
                     }
 
                     foreach ($tempFiles as $f) {
@@ -698,9 +801,20 @@ class ImportProblemService
                 }
             }
 
-            $messages[] = sprintf('Added %d jury solution(s).', $numJurySolutions);
+            if ($numJurySolutions > 0) {
+                $messages[] = sprintf('Added %d jury solution(s): %s', $numJurySolutions,
+                    join(', ', $successful_subs));
+            }
+            if (!empty($subs_with_unknown_lang)) {
+                $messages[] = sprintf("Could not add jury solution due to unknown language: %s",
+                    join(', ', $subs_with_unknown_lang));
+            }
+            if (!empty($too_large_subs)) {
+                $messages[] = sprintf("Could not add jury solution because they are too large: %s",
+                    join(', ', $too_large_subs));
+            }
         } else {
-            $messages[] = 'No jury solutions added: problem not submittable';
+            $messages[] = 'No jury solutions added: problem not submittable.';
         }
 
         $messages[] = sprintf('Saved problem %d', $problem->getProbid());

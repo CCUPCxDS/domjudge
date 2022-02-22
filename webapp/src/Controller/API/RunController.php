@@ -8,22 +8,24 @@ use App\Service\ConfigurationService;
 use App\Service\DOMJudgeService;
 use App\Service\EventLogService;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\NonUniqueResultException;
 use Doctrine\ORM\QueryBuilder;
+use Exception;
 use FOS\RestBundle\Controller\Annotations as Rest;
 use Nelmio\ApiDocBundle\Annotation\Model;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\IsGranted;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\Security;
-use Swagger\Annotations as SWG;
+use OpenApi\Annotations as OA;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
 
 /**
- * @Rest\Route("/api/v4/contests/{cid}/runs", defaults={ "_format" = "json" })
- * @Rest\Prefix("/api/contests/{cid}/runs")
- * @Rest\NamePrefix("run_")
- * @SWG\Tag(name="Runs")
- * @SWG\Parameter(ref="#/parameters/cid")
- * @SWG\Response(response="404", ref="#/definitions/NotFound")
- * @SWG\Response(response="401", ref="#/definitions/Unauthorized")
+ * @Rest\Route("/contests/{cid}/runs")
+ * @OA\Tag(name="Runs")
+ * @OA\Parameter(ref="#/components/parameters/cid")
+ * @OA\Response(response="404", ref="#/components/responses/NotFound")
+ * @OA\Response(response="401", ref="#/components/responses/Unauthorized")
+ * @OA\Response(response="400", ref="#/components/responses/InvalidResponse")
  */
 class RunController extends AbstractRestController implements QueryObjectTransformer
 {
@@ -48,49 +50,49 @@ class RunController extends AbstractRestController implements QueryObjectTransfo
     /**
      * Get all the runs for this contest
      * @param Request $request
-     * @return \Symfony\Component\HttpFoundation\Response
+     * @return Response
      * @Security("is_granted('ROLE_JURY') or is_granted('ROLE_JUDGEHOST') or is_granted('ROLE_API_READER')")
      * @Rest\Get("")
-     * @SWG\Response(
+     * @OA\Response(
      *     response="200",
      *     description="Returns all the runs for this contest",
-     *     @SWG\Schema(
+     *     @OA\JsonContent(
      *         type="array",
-     *         @SWG\Items(
+     *         @OA\Items(
      *             allOf={
-     *                 @SWG\Schema(ref=@Model(type=JudgingRun::class)),
-     *                 @SWG\Schema(ref="#/definitions/RunExtraFields")
+     *                 @OA\Schema(ref=@Model(type=JudgingRun::class)),
+     *                 @OA\Schema(ref="#/components/schemas/RunExtraFields")
      *             }
      *         )
      *     )
      * )
-     * @SWG\Parameter(ref="#/parameters/idlist")
-     * @SWG\Parameter(ref="#/parameters/strict")
-     * @SWG\Parameter(
+     * @OA\Parameter(ref="#/components/parameters/idlist")
+     * @OA\Parameter(ref="#/components/parameters/strict")
+     * @OA\Parameter(
      *     name="first_id",
      *     in="query",
-     *     type="string",
-     *     description="Only show runs starting from this ID"
+     *     description="Only show runs starting from this ID",
+     *     @OA\Schema(type="string")
      * )
-     * @SWG\Parameter(
+     * @OA\Parameter(
      *     name="last_id",
      *     in="query",
-     *     type="string",
-     *     description="Only show runs until this ID"
+     *     description="Only show runs until this ID",
+     *     @OA\Schema(type="string")
      * )
-     * @SWG\Parameter(
+     * @OA\Parameter(
      *     name="judging_id",
      *     in="query",
-     *     type="string",
-     *     description="Only show runs for this judgement"
+     *     description="Only show runs for this judgement",
+     *     @OA\Schema(type="string")
      * )
-     * @SWG\Parameter(
+     * @OA\Parameter(
      *     name="limit",
      *     in="query",
-     *     type="integer",
-     *     description="Limit the number of returned runs to this amount"
+     *     description="Limit the number of returned runs to this amount",
+     *     @OA\Schema(type="integer")
      * )
-     * @throws \Doctrine\ORM\NonUniqueResultException
+     * @throws NonUniqueResultException
      */
     public function listAction(Request $request)
     {
@@ -99,33 +101,29 @@ class RunController extends AbstractRestController implements QueryObjectTransfo
 
     /**
      * Get the given run for this contest
-     * @param Request $request
-     * @param string $id
-     * @return \Symfony\Component\HttpFoundation\Response
-     * @throws \Doctrine\ORM\NonUniqueResultException
+     * @throws NonUniqueResultException
      * @Security("is_granted('ROLE_JURY') or is_granted('ROLE_JUDGEHOST') or is_granted('ROLE_API_READER')")
      * @Rest\Get("/{id}")
-     * @SWG\Response(
+     * @OA\Response(
      *     response="200",
      *     description="Returns the given run for this contest",
-     *     @SWG\Schema(
+     *     @OA\JsonContent(
      *         allOf={
-     *             @SWG\Schema(ref=@Model(type=JudgingRun::class)),
-     *             @SWG\Schema(ref="#/definitions/RunExtraFields")
+     *             @OA\Schema(ref=@Model(type=JudgingRun::class)),
+     *             @OA\Schema(ref="#/components/schemas/RunExtraFields")
      *         }
      *     )
      * )
-     * @SWG\Parameter(ref="#/parameters/id")
-     * @SWG\Parameter(ref="#/parameters/strict")
+     * @OA\Parameter(ref="#/components/parameters/id")
+     * @OA\Parameter(ref="#/components/parameters/strict")
      */
-    public function singleAction(Request $request, string $id)
+    public function singleAction(Request $request, string $id) : Response
     {
         return parent::performSingleAction($request, $id);
     }
 
     /**
-     * @inheritdoc
-     * @throws \Exception
+     * @throws Exception
      */
     protected function getQueryBuilder(Request $request): QueryBuilder
     {
@@ -136,7 +134,10 @@ class RunController extends AbstractRestController implements QueryObjectTransfo
             ->leftJoin('j.submission', 's')
             ->leftJoin('j.contest', 'c')
             ->select('jr, j, tc, c')
-            ->andWhere('j.cid = :cid')
+            ->andWhere('j.contest = :cid')
+            // With the new judgehost API we pre-create the judging_runs; only expose those who correspond to a real run
+            // on a judgehost.
+            ->andWhere('jr.endtime IS NOT NULL')
             ->setParameter(':cid', $this->getContestId($request));
 
         if ($request->query->has('first_id')) {
@@ -153,7 +154,7 @@ class RunController extends AbstractRestController implements QueryObjectTransfo
 
         if ($request->query->has('judging_id')) {
             $queryBuilder
-                ->andWhere('jr.judgingid = :judging_id')
+                ->andWhere('jr.judging = :judging_id')
                 ->setParameter(':judging_id', $request->query->get('judging_id'));
         }
 
@@ -165,7 +166,7 @@ class RunController extends AbstractRestController implements QueryObjectTransfo
         if (!$request->attributes->has('id') && !$request->query->has('ids')) {
             $queryBuilder
                 ->andWhere('s.submittime < c.endtime')
-                ->andWhere('j.rejudgingid IS NULL OR j.valid = 1');
+                ->andWhere('j.rejudging IS NULL OR j.valid = 1');
             if ($this->config->get('verification_required')) {
                 $queryBuilder->andWhere('j.verified = 1');
             }
@@ -174,18 +175,12 @@ class RunController extends AbstractRestController implements QueryObjectTransfo
         return $queryBuilder;
     }
 
-    /**
-     * @inheritdoc
-     */
     protected function getIdField(): string
     {
         return 'jr.runid';
     }
 
-    /**
-     * @inheritdoc
-     */
-    public function transformObject($object)
+    public function transformObject($object) : JudgingRunWrapper
     {
         /** @var JudgingRun $judgingRun */
         $judgingRun      = $object;

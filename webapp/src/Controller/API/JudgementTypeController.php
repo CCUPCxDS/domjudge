@@ -2,40 +2,39 @@
 
 namespace App\Controller\API;
 
+use Doctrine\ORM\NonUniqueResultException;
 use Doctrine\ORM\QueryBuilder;
+use Exception;
 use FOS\RestBundle\Controller\Annotations as Rest;
-use Swagger\Annotations as SWG;
+use OpenApi\Annotations as OA;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\Intl\Exception\NotImplementedException;
 
 /**
- * @Rest\Route("/api/v4/contests/{cid}/judgement-types", defaults={ "_format" = "json" })
- * @Rest\Prefix("/api/contests/{cid}/judgement-types")
- * @Rest\NamePrefix("judgement_type_")
- * @SWG\Tag(name="Judgement types")
+ * @Rest\Route("/contests/{cid}/judgement-types")
+ * @OA\Tag(name="Judgement types")
+ * @OA\Response(response="400", ref="#/components/responses/InvalidResponse")
  */
 class JudgementTypeController extends AbstractRestController
 {
     /**
      * Get all the judgement types for this contest
-     * @param Request $request
-     * @return array
-     * @throws \Exception
+     * @throws Exception
      * @Rest\Get("")
-     * @SWG\Response(
+     * @OA\Response(
      *     response="200",
      *     description="Returns all the judgement types for this contest",
-     *     @SWG\Schema(
+     *     @OA\JsonContent(
      *         type="array",
-     *         @SWG\Items(ref="#/definitions/JudgementType")
+     *         @OA\Items(ref="#/components/schemas/JudgementType")
      *     )
      * )
-     * @SWG\Parameter(ref="#/parameters/idlist")
-     * @SWG\Parameter(ref="#/parameters/strict")
+     * @OA\Parameter(ref="#/components/parameters/idlist")
+     * @OA\Parameter(ref="#/components/parameters/strict")
      */
-    public function listAction(Request $request)
+    public function listAction(Request $request) : array
     {
         // Call getContestId to make sure we have an active contest
         $this->getContestId($request);
@@ -60,21 +59,18 @@ class JudgementTypeController extends AbstractRestController
 
     /**
      * Get the given judgement type for this contest
-     * @param Request $request
-     * @param string $id
-     * @return array
-     * @throws \Doctrine\ORM\NonUniqueResultException
-     * @throws \Exception
+     * @throws NonUniqueResultException
+     * @throws Exception
      * @Rest\Get("/{id}")
-     * @SWG\Response(
+     * @OA\Response(
      *     response="200",
      *     description="Returns the given judgement type for this contest",
-     *     @SWG\Schema(ref="#/definitions/JudgementType")
+     *     @OA\JsonContent(ref="#/components/schemas/JudgementType")
      * )
-     * @SWG\Parameter(ref="#/parameters/id")
-     * @SWG\Parameter(ref="#/parameters/strict")
+     * @OA\Parameter(ref="#/components/parameters/id")
+     * @OA\Parameter(ref="#/components/parameters/strict")
      */
-    public function singleAction(Request $request, string $id)
+    public function singleAction(Request $request, string $id) : array
     {
         // Call getContestId to make sure we have an active contest
         $this->getContestId($request);
@@ -89,11 +85,9 @@ class JudgementTypeController extends AbstractRestController
 
     /**
      * Get the judgement types, optionally filtered on the given ID's
-     * @param string[]|null $filteredOn
-     * @return array
-     * @throws \Exception
+     * @throws Exception
      */
-    protected function getJudgementTypes(array $filteredOn = null)
+    protected function getJudgementTypes(array $filteredOn = null) : ?array
     {
         $verdictsConfig = $this->dj->getDomjudgeEtcDir() . '/verdicts.php';
         $verdicts       = include $verdictsConfig;
@@ -122,17 +116,11 @@ class JudgementTypeController extends AbstractRestController
         return $result;
     }
 
-    /**
-     * @inheritdoc
-     */
     protected function getQueryBuilder(Request $request): QueryBuilder
     {
         throw new NotImplementedException();
     }
 
-    /**
-     * @inheritdoc
-     */
     protected function getIdField(): string
     {
         throw new NotImplementedException();

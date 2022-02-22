@@ -56,7 +56,7 @@ class ConfigurationService
     /**
      * @var array
      */
-    protected $dbConfigCache = [];
+    protected $dbConfigCache = null;
 
     /**
      * ConfigurationService constructor.
@@ -207,7 +207,7 @@ EOF;
 
         /** @var Configuration[] $options */
         $options = $this->em->createQueryBuilder()
-            ->from(Configuration::class, 'c',  'c.name')
+            ->from(Configuration::class, 'c', 'c.name')
             ->select('c')
             ->getQuery()
             ->getResult();
@@ -240,14 +240,14 @@ EOF;
                 $val = $dataToSet[$specName];
             }
             if ($specName == 'verification_required' &&
-                $oldValue && !$val ) {
+                $oldValue && !$val) {
                 // If toggled off, we have to send events for all judgings
                 // that are complete, but not verified yet. Scoreboard
                 // cache refresh should take care of the rest. See #645.
                 $this->logUnverifiedJudgings($eventLog);
                 $needsMerge = true;
             }
-            switch ( $spec['type'] ) {
+            switch ($spec['type']) {
                 case 'bool':
                     $optionToSet->setValue((bool)$val);
                     break;
@@ -261,7 +261,7 @@ EOF;
                     break;
 
                 case 'array_val':
-                    $result = array();
+                    $result = [];
                     foreach ($val as $data) {
                         if (!empty($data)) {
                             $result[] = $data;
@@ -271,7 +271,7 @@ EOF;
                     break;
 
                 case 'array_keyval':
-                    $result = array();
+                    $result = [];
                     foreach ($val as $key => $data) {
                         if (!empty($data)) {
                             $result[$key] = $data;
@@ -295,13 +295,13 @@ EOF;
             }
         }
 
-        if ( $needsMerge ) {
+        if ($needsMerge) {
             foreach ($options as $option) $this->em->merge($option);
         }
 
         $this->em->flush();
 
-        $this->dbConfigCache = [];
+        $this->dbConfigCache = null;
     }
 
     /**
@@ -316,7 +316,7 @@ EOF;
 
         $judgings_per_contest = [];
         foreach ($judgings as $judging) {
-            $judgings_per_contest[$judging->getCid()][] = $judging->getJudgingid();
+            $judgings_per_contest[$judging->getContest()->getCid()][] = $judging->getJudgingid();
         }
 
         // Log to event table; normal cases are handled in:
@@ -336,7 +336,8 @@ EOF;
      */
     protected function getDbValues(): array
     {
-        if (empty($this->dbConfigCache)) {
+        if ($this->dbConfigCache === null) {
+            $this->dbConfigCache = [];
             $configs = $this->em->getRepository(Configuration::class)->findAll();
             foreach ($configs as $config) {
                 $this->dbConfigCache[$config->getName()] = $config->getValue();
@@ -344,6 +345,23 @@ EOF;
         }
 
         return $this->dbConfigCache;
+    }
+
+    /**
+     * Find list of options for configuration parameters that specify a known executable.
+     *
+     * @param string $type Any of "compare", "compile", "run"
+     *
+     * @return array
+     */
+    private function findExecutableOptions(string $type): array
+    {
+        $executables = $this->em->getRepository(Executable::class)->findBy(['type'=>$type]);
+        $options = [];
+        foreach ($executables as $executable) {
+            $options[$executable->getExecid()] = $executable->getDescription();
+        }
+        return $options;
     }
 
     /**
@@ -360,12 +378,13 @@ EOF;
     {
         switch ($item['name']) {
             case 'default_compare':
+                $item['options'] = $this->findExecutableOptions('compare');
+                break;
             case 'default_run':
-                $executables     = $this->em->getRepository(Executable::class)->findAll();
-                $item['options'] = [];
-                foreach ($executables as $executable) {
-                    $item['options'][$executable->getExecid()] = $executable->getDescription();
-                }
+                $item['options'] = $this->findExecutableOptions('run');
+                break;
+            case 'default_full_debug':
+                $item['options'] = $this->findExecutableOptions('debug');
                 break;
             case 'results_prio':
             case 'results_remap':

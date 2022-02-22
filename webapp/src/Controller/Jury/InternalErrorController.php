@@ -4,13 +4,17 @@ namespace App\Controller\Jury;
 
 use App\Controller\BaseController;
 use App\Doctrine\DBAL\Types\InternalErrorStatusType;
-use App\Entity\ContestProblem;
 use App\Entity\InternalError;
+use App\Entity\Judgehost;
+use App\Entity\JudgeTask;
 use App\Entity\Problem;
 use App\Service\DOMJudgeService;
+use App\Service\RejudgingService;
 use App\Utils\Utils;
 use Doctrine\ORM\EntityManagerInterface;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\IsGranted;
+use Symfony\Component\HttpFoundation\RedirectResponse;
+use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\PropertyAccess\PropertyAccess;
 use Symfony\Component\Routing\Annotation\Route;
@@ -31,20 +35,24 @@ class InternalErrorController extends BaseController
      */
     protected $dj;
 
-    public function __construct(EntityManagerInterface $em, DOMJudgeService $dj)
+    protected $rejudgingService;
+
+    public function __construct(EntityManagerInterface $em, DOMJudgeService $dj, RejudgingService $rejudgingService)
     {
         $this->em = $em;
         $this->dj = $dj;
+        $this->rejudgingService = $rejudgingService;
     }
 
     /**
      * @Route("", name="jury_internal_errors")
      */
-    public function indexAction()
+    public function indexAction(): Response
     {
         /** @var InternalError[] $internalErrors */
         $internalErrors = $this->em->createQueryBuilder()
             ->from(InternalError::class, 'e')
+            ->leftJoin('e.judging', 'j')
             ->select('e')
             ->orderBy('e.status')
             ->addOrderBy('e.errorid')
@@ -52,7 +60,7 @@ class InternalErrorController extends BaseController
 
         $table_fields = [
             'errorid' => ['title' => 'ID'],
-            'judgingid' => ['title' => 'jid'],
+            'judging.judgingid' => ['title' => 'jid'],
             'description' => ['title' => 'description'],
             'time' => ['title' => 'time'],
             'status' => ['title' => 'status'],
@@ -66,6 +74,8 @@ class InternalErrorController extends BaseController
             foreach ($table_fields as $k => $v) {
                 if ($propertyAccessor->isReadable($internal, $k)) {
                     $internalerrordata[$k] = ['value' => $propertyAccessor->getValue($internal, $k)];
+                } else {
+                    $internalerrordata[$k] = ['value' => null];
                 }
             }
 
@@ -92,10 +102,8 @@ class InternalErrorController extends BaseController
 
     /**
      * @Route("/{errorId<\d+>}", methods={"GET"}, name="jury_internal_error")
-     * @param int $errorId
-     * @return \Symfony\Component\HttpFoundation\Response
      */
-    public function viewAction(int $errorId)
+    public function viewAction(int $errorId) : Response
     {
         /** @var InternalError $internalError */
         $internalError = $this->em->getRepository(InternalError::class)->find($errorId);
@@ -112,12 +120,18 @@ class InternalErrorController extends BaseController
                 $affectedText = $problem->getName();
                 break;
             case 'judgehost':
-                $affectedLink = $this->generateUrl('jury_judgehost', ['hostname' => $disabled['hostname']]);
+                // Judgehosts get disabled by their hostname, so we need to look it up here
+                $judgehost    = $this->em->getRepository(Judgehost::class)->findOneBy(['hostname' => $disabled['hostname']]);
+                $affectedLink = $this->generateUrl('jury_judgehost', ['judgehostid' => $judgehost->getJudgehostid()]);
                 $affectedText = $disabled['hostname'];
                 break;
             case 'language':
                 $affectedLink = $this->generateUrl('jury_language', ['langId' => $disabled['langid']]);
                 $affectedText = $disabled['langid'];
+                break;
+            case 'executable':
+                $affectedLink = $this->generateUrl('jury_executable', ['execId' => $disabled['execid']]);
+                $affectedText = $disabled['execid'];
                 break;
         }
 
@@ -138,11 +152,8 @@ class InternalErrorController extends BaseController
      *     name="jury_internal_error_handle",
      *     methods={"POST"}
      * )
-     * @param int    $errorId
-     * @param string $action
-     * @return \Symfony\Component\HttpFoundation\RedirectResponse
      */
-    public function handleAction(int $errorId, string $action)
+    public function handleAction(int $errorId, string $action): RedirectResponse
     {
         /** @var InternalError $internalError */
         $internalError = $this->em->getRepository(InternalError::class)->find($errorId);
@@ -155,8 +166,22 @@ class InternalErrorController extends BaseController
                     $internalError->getContest(),
                     true
                 );
+
                 $this->dj->auditlog('internal_error', $internalError->getErrorid(),
                                     sprintf('internal error: %s', $status));
+
+                $affectedJudgings = $internalError->getAffectedJudgings();
+                if ($affectedJudgings !== null) {
+                    $skipped = [];
+                    $this->rejudgingService->createRejudging(
+                        'Internal Error ' . $internalError->getErrorid() . ' resolved',
+                        JudgeTask::PRIORITY_DEFAULT,
+                        $affectedJudgings->getValues(),
+                        false,
+                        0,
+                        null,
+                        $skipped);
+                }
             }
         });
 

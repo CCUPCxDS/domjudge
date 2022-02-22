@@ -43,9 +43,6 @@ class SecurityController extends AbstractController
 
     /**
      * @Route("/login", name="login")
-     * @param Request                       $request
-     * @param AuthorizationCheckerInterface $authorizationChecker
-     * @param AuthenticationUtils           $authUtils
      * @return RedirectResponse|Response
      * @throws Exception
      */
@@ -63,7 +60,7 @@ class SecurityController extends AbstractController
         }
 
         $ipAutologin = $this->config->get('ip_autologin');
-        if ($authorizationChecker->isGranted('IS_AUTHENTICATED_FULLY') && !$ipAutologin) {
+        if (!$ipAutologin && $authorizationChecker->isGranted('IS_AUTHENTICATED_FULLY')) {
             return $this->redirect($this->generateUrl('root'));
         }
 
@@ -84,24 +81,24 @@ class SecurityController extends AbstractController
         // Add a header so we can detect that this is the login page
         $response = new Response();
         $response->headers->set('X-Login-Page', $this->generateUrl('login'));
+        if (!empty($error)) {
+            $response->setStatusCode(401);
+        }
 
         $selfRegistrationCategoriesCount = $em->getRepository(TeamCategory::class)->count(['allow_self_registration' => 1]);
 
-        return $this->render('security/login.html.twig', array(
+        return $this->render('security/login.html.twig', [
             'last_username' => $lastUsername,
             'error' => $error,
             'allow_registration' => $selfRegistrationCategoriesCount !== 0,
             'allowed_authmethods' => $authmethods,
             'auth_xheaders_present' => $request->headers->get('X-DOMjudge-Login'),
             'auth_ipaddress_users' => $auth_ipaddress_users,
-        ), $response);
+        ], $response);
     }
 
     /**
      * @Route("/register", name="register")
-     * @param Request                       $request
-     * @param AuthorizationCheckerInterface $authorizationChecker
-     * @param UserPasswordEncoderInterface  $passwordEncoder
      * @return RedirectResponse|Response
      * @throws Exception
      */
@@ -127,13 +124,12 @@ class SecurityController extends AbstractController
         $registration_form = $this->createForm(UserRegistrationType::class, $user);
         $registration_form->handleRequest($request);
         if ($registration_form->isSubmitted() && $registration_form->isValid()) {
-            $team_role = $em->getRepository(Role::class)->findOneBy(['dj_role' => 'team']);
-
             $plainPass = $registration_form->get('plainPassword')->getData();
             $password  = $passwordEncoder->encodePassword($user, $plainPass);
             $user->setPassword($password);
-            $user->setName($user->getUsername());
-            $user->addUserRole($team_role);
+            if ($user->getName() === null) {
+                $user->setName($user->getUsername());
+            }
 
             $teamName = $registration_form->get('teamName')->getData();
 
@@ -181,8 +177,6 @@ class SecurityController extends AbstractController
             return $this->redirect($this->generateUrl('login'));
         }
 
-        return $this->render('security/register.html.twig', array(
-            'registration_form' => $registration_form->createView(),
-        ));
+        return $this->render('security/register.html.twig', ['registration_form' => $registration_form->createView()]);
     }
 }

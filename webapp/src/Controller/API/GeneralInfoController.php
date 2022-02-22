@@ -2,31 +2,34 @@
 
 namespace App\Controller\API;
 
-use App\Entity\Configuration;
 use App\Entity\Contest;
-use App\Entity\Judging;
 use App\Entity\User;
 use App\Service\CheckConfigService;
 use App\Service\ConfigurationService;
 use App\Service\DOMJudgeService;
 use App\Service\EventLogService;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\NonUniqueResultException;
+use Doctrine\ORM\NoResultException;
+use Exception;
 use FOS\RestBundle\Controller\AbstractFOSRestController;
 use FOS\RestBundle\Controller\Annotations as Rest;
 use Nelmio\ApiDocBundle\Annotation\Model;
+use OpenApi\Annotations as OA;
 use Psr\Log\LoggerInterface;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\IsGranted;
-use Swagger\Annotations as SWG;
+use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
 use Symfony\Component\HttpKernel\Exception\HttpException;
+use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
+use Symfony\Component\Intl\Countries;
 use Symfony\Component\Routing\RouterInterface;
 
 /**
- * @Rest\Route("/api/v4", defaults={ "_format" = "json" })
- * @Rest\Prefix("/api")
- * @Rest\NamePrefix("general_")
- * @SWG\Tag(name="General")
+ * @OA\Tag(name="General")
+ * @OA\Response(response="400", ref="#/components/responses/InvalidResponse")
  */
 class GeneralInfoController extends AbstractFOSRestController
 {
@@ -67,17 +70,6 @@ class GeneralInfoController extends AbstractFOSRestController
      */
     protected $logger;
 
-    /**
-     * GeneralInfoController constructor.
-     *
-     * @param EntityManagerInterface $em
-     * @param DOMJudgeService        $dj
-     * @param ConfigurationService   $config
-     * @param EventLogService        $eventLogService
-     * @param CheckConfigService     $checkConfigService
-     * @param RouterInterface        $router
-     * @param LoggerInterface        $logger
-     */
     public function __construct(
         EntityManagerInterface $em,
         DOMJudgeService $dj,
@@ -99,76 +91,73 @@ class GeneralInfoController extends AbstractFOSRestController
     /**
      * Get the current API version
      * @Rest\Get("/version")
-     * @SWG\Response(
+     * @OA\Response(
      *     response="200",
      *     description="The current API version information",
-     *     @SWG\Schema(
+     *     @OA\JsonContent(
      *         type="object",
-     *         @SWG\Property(property="api_version", type="integer")
+     *         @OA\Property(property="api_version", type="integer")
      *     )
      * )
      */
-    public function getVersionAction()
+    public function getVersionAction(): array
     {
-        $data = ['api_version' => $this->apiVersion];
-        return $data;
+        return ['api_version' => $this->apiVersion];
     }
 
     /**
      * Get information about the API and DOMjudge
      * @Rest\Get("/info")
      * @Rest\Get("", name="api_root")
-     * @SWG\Response(
+     * @OA\Response(
      *     response="200",
      *     description="Information about the API and DOMjudge",
-     *     @SWG\Schema(
+     *     @OA\JsonContent(
      *         type="object",
-     *         @SWG\Property(property="api_version", type="integer"),
-     *         @SWG\Property(property="domjudge_version", type="string"),
-     *         @SWG\Property(property="environment", type="string"),
-     *         @SWG\Property(property="doc_url", type="string")
+     *         @OA\Property(property="api_version", type="integer"),
+     *         @OA\Property(property="domjudge_version", type="string"),
+     *         @OA\Property(property="environment", type="string"),
+     *         @OA\Property(property="doc_url", type="string")
      *     )
      * )
      */
-    public function getInfoAction()
+    public function getInfoAction(): array
     {
-        $data = [
+        return [
             'api_version' => $this->apiVersion,
             'domjudge_version' => $this->getParameter('domjudge.version'),
             'environment' => $this->getParameter('kernel.environment'),
             'doc_url' => $this->router->generate('app.swagger_ui', [], RouterInterface::ABSOLUTE_URL),
         ];
-        return $data;
     }
 
     /**
      * Get general status information
      * @Rest\Get("/status")
      * @IsGranted("ROLE_API_READER")
-     * @SWG\Response(
+     * @OA\Response(
      *     response="200",
      *     description="General status information for the currently active contests",
-     *     @SWG\Schema(
+     *     @OA\JsonContent(
      *         type="array",
-     *         @SWG\Items(
+     *         @OA\Items(
      *             type="object",
-     *             @SWG\Property(property="cid", type="integer"),
-     *             @SWG\Property(property="num_submissions", type="integer"),
-     *             @SWG\Property(property="num_queued", type="integer"),
-     *             @SWG\Property(property="num_judging", type="integer")
+     *             @OA\Property(property="cid", type="integer"),
+     *             @OA\Property(property="num_submissions", type="integer"),
+     *             @OA\Property(property="num_queued", type="integer"),
+     *             @OA\Property(property="num_judging", type="integer")
      *         )
      *     )
      * )
-     * @return array
-     * @throws \Doctrine\ORM\NoResultException
-     * @throws \Doctrine\ORM\NonUniqueResultException
+     * @throws NoResultException
+     * @throws NonUniqueResultException
      */
-    public function getStatusAction()
+    public function getStatusAction(): array
     {
         if ($this->dj->checkrole('jury')) {
             $onlyOfTeam = null;
-        } elseif ($this->dj->checkrole('team') && $this->dj->getUser()->getTeamid()) {
-            $onlyOfTeam = $this->dj->getUser()->getTeamid();
+        } elseif ($this->dj->checkrole('team') && $this->dj->getUser()->getTeam()) {
+            $onlyOfTeam = $this->dj->getUser()->getTeam();
         } else {
             $onlyOfTeam = -1;
         }
@@ -180,7 +169,9 @@ class GeneralInfoController extends AbstractFOSRestController
         $result = [];
         foreach ($contests as $contest) {
             $contestStats = $this->dj->getContestStats($contest);
-            $contestStats['cid'] = $contest->getCid();
+            $contestStats['cid'] =
+                $this->config->get('data_source') === DOMJudgeService::DATA_SOURCE_LOCAL
+                    ? $contest->getCid() : $contest->getExternalid();
             $result[] = $contestStats;
         }
 
@@ -190,14 +181,13 @@ class GeneralInfoController extends AbstractFOSRestController
     /**
      * Get information about the currently logged in user
      * @Rest\Get("/user")
-     * @SWG\Response(
+     * @OA\Response(
      *     response="200",
      *     description="Information about the logged in user",
      *     @Model(type=User::class)
      * )
-     * @return \App\Entity\User|null
      */
-    public function getUserAction()
+    public function getUserAction() : User
     {
         $user = $this->dj->getUser();
         if ($user === null) {
@@ -210,23 +200,21 @@ class GeneralInfoController extends AbstractFOSRestController
     /**
      * Get configuration variables
      * @Rest\Get("/config")
-     * @SWG\Response(
+     * @OA\Response(
      *     response="200",
      *     description="The configuration variables",
-     *     @SWG\Schema(type="object")
+     *     @OA\JsonContent(type="object")
      * )
-     * @SWG\Parameter(
+     * @OA\Parameter(
      *     name="name",
      *     in="query",
-     *     type="string",
      *     description="Get only this configuration variable",
-     *     required=false
+     *     required=false,
+     *     @OA\Schema(type="string")
      * )
-     * @param Request $request
-     * @return \App\Entity\Configuration[]|mixed
-     * @throws \Exception
+     * @throws Exception
      */
-    public function getDatabaseConfigurationAction(Request $request)
+    public function getDatabaseConfigurationAction(Request $request) : array
     {
         $onlypublic = !($this->dj->checkrole('jury') || $this->dj->checkrole('judgehost'));
         $name       = $request->query->get('name');
@@ -248,24 +236,19 @@ class GeneralInfoController extends AbstractFOSRestController
      * Update configuration variables
      * @Rest\Put("/config")
      * @IsGranted("ROLE_ADMIN")
-     * @SWG\Response(
+     * @OA\Response(
      *     response="200",
      *     description="The full configuration after change",
-     *     @SWG\Schema(type="object")
+     *     @OA\JsonContent(type="object")
      * )
-     * @SWG\Parameter(
-     *     name="body",
-     *     in="body",
-     *     type="object",
-     *     description="The config variables to update. Keys are configuration names, values are configuration values. For scalars, use scalars. For arrays, use arrays with scalars and for key-value arrays use objects.",
+     * @OA\RequestBody(
      *     required=true,
-     *     schema={}
+     *     @OA\MediaType(mediaType="application/x-www-form-urlencoded"),
+     *     @OA\MediaType(mediaType="application/json")
      * )
-     * @param Request $request
-     * @return \App\Entity\Configuration[]|mixed
-     * @throws \Exception
+     * @throws Exception
      */
-    public function updateConfigurationAction(Request $request)
+    public function updateConfigurationAction(Request $request): array
     {
         $this->config->saveChanges($request->request->all(), $this->eventLogService, $this->dj);
         return $this->config->all(false);
@@ -275,14 +258,13 @@ class GeneralInfoController extends AbstractFOSRestController
      * Check the DOMjudge configuration
      * @Rest\Get("/config/check")
      * @IsGranted("ROLE_ADMIN")
-     * @SWG\Response(
+     * @OA\Response(
      *     response="200",
      *     description="Result of the various checks performed",
-     *     @SWG\Schema(type="object")
+     *     @OA\JsonContent(type="object")
      * )
-     * @return \Symfony\Component\HttpFoundation\JsonResponse
      */
-    public function getConfigCheckAction()
+    public function getConfigCheckAction(): JsonResponse
     {
         $result = $this->checkConfigService->runAll();
 
@@ -309,16 +291,54 @@ class GeneralInfoController extends AbstractFOSRestController
     }
 
     /**
+     * Get the flag for the given country
+     * @Rest\Get("/country-flags/{countryCode}/{size}")
+     * @OA\Response(
+     *     response="200",
+     *     description="Returns the given country flag in SVG format",
+     *     @OA\MediaType(mediaType="image/svg+xml")
+     * )
+     * @OA\Parameter(
+     *     name="countryCode",
+     *     in="path",
+     *     description="The ISO 3166-1 alpha-3 code for the country to get the flag for",
+     *     @OA\Schema(type="string")
+     * )
+     */
+    public function countryFlagAction(Request $request, string $countryCode, string $size): Response
+    {
+        // This API action exists for two reasons
+        // - Relative URL's are relative to the API root according to the CCS spec. This
+        //   means that we need to have an API endpoint for files.
+        // - This makes it that we can not return a flag if flags are disabled.
+
+        if (!$this->config->get('show_flags')) {
+            throw new NotFoundHttpException('country flags disabled');
+        }
+
+        $alpha3code = strtoupper($countryCode);
+        if (!Countries::alpha3CodeExists($alpha3code)) {
+            throw new NotFoundHttpException("country $alpha3code does not exist");
+        }
+        $alpha2code = strtolower(Countries::getAlpha2Code($alpha3code));
+        $flagFile = sprintf('%s/public/flags/%s/%s.svg', $this->dj->getDomjudgeWebappDir(), $size, $alpha2code);
+
+        if (!file_exists($flagFile)) {
+            throw new NotFoundHttpException("country flag for $alpha3code of size $size not found");
+        }
+
+        return AbstractRestController::sendBinaryFileResponse($request, $flagFile);
+    }
+
+    /**
      * Get the field to use for getting contests by ID
-     * @return string
      */
     protected function getContestIdField(): string
     {
         try {
             return $this->eventLogService->externalIdFieldForEntity(Contest::class) ?? 'cid';
-        } catch (\Exception $e) {
+        } catch (Exception $e) {
             return 'cid';
         }
     }
-
 }

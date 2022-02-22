@@ -9,23 +9,23 @@ use App\Service\EventLogService;
 use App\Service\ScoreboardService;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\QueryBuilder;
+use Exception;
 use FOS\RestBundle\Controller\Annotations as Rest;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\IsGranted;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\Security;
-use Swagger\Annotations as SWG;
+use OpenApi\Annotations as OA;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\Intl\Exception\NotImplementedException;
 
 /**
- * @Rest\Route("/api/v4/contests/{cid}/awards", defaults={ "_format" = "json" })
- * @Rest\Prefix("/api/contests/{cid}/awards")
- * @Rest\NamePrefix("awards_")
- * @SWG\Tag(name="Awards")
- * @SWG\Parameter(ref="#/parameters/cid")
- * @SWG\Response(response="404", ref="#/definitions/NotFound")
- * @SWG\Response(response="401", ref="#/definitions/Unauthorized")
+ * @Rest\Route("/contests/{cid}/awards")
+ * @OA\Tag(name="Awards")
+ * @OA\Parameter(ref="#/components/parameters/cid")
+ * @OA\Response(response="404", ref="#/components/responses/NotFound")
+ * @OA\Response(response="401", ref="#/components/responses/Unauthorized")
+ * @OA\Response(response="400", ref="#/components/responses/InvalidResponse")
  */
 class AwardsController extends AbstractRestController
 {
@@ -36,12 +36,6 @@ class AwardsController extends AbstractRestController
 
     /**
      * ScoreboardController constructor.
-     *
-     * @param EntityManagerInterface $entityManager
-     * @param DOMJudgeService        $DOMJudgeService
-     * @param ConfigurationService   $config
-     * @param EventLogService        $eventLogService
-     * @param ScoreboardService      $scoreboardService
      */
     public function __construct(
         EntityManagerInterface $entityManager,
@@ -56,41 +50,36 @@ class AwardsController extends AbstractRestController
 
     /**
      * Get all the awards standings for this contest
-     * @param Request $request
-     * @return array
      * @Rest\Get("")
-     * @SWG\Response(
+     * @OA\Response(
      *     response="200",
      *     description="Returns the current teams qualifying for each award",
-     *     @SWG\Schema(
+     *     @OA\JsonContent(
      *         type="array",
-     *         @SWG\Items(ref="#/definitions/Award")
+     *         @OA\Items(ref="#/components/schemas/Award")
      *     )
      * )
-     * @SWG\Parameter(ref="#/parameters/strict")
-     * @throws \Exception
+     * @OA\Parameter(ref="#/components/parameters/strict")
+     * @throws Exception
      */
-    public function listAction(Request $request)
+    public function listAction(Request $request): ?array
     {
         return $this->getAwardsData($request);
     }
 
     /**
-     * Get the given clarifications for this contest
-     * @param Request $request
-     * @param string  $id
-     * @return array
+     * Get the specific award for this contest
      * @Rest\Get("/{id}")
-     * @SWG\Response(
+     * @OA\Response(
      *     response="200",
      *     description="Returns the award for this contest",
-     *     @SWG\Schema(ref="#/definitions/Award")
+     *     @OA\JsonContent(ref="#/components/schemas/Award")
      * )
-     * @SWG\Parameter(ref="#/parameters/id")
-     * @SWG\Parameter(ref="#/parameters/strict")
-     * @throws \Exception
+     * @OA\Parameter(ref="#/components/parameters/id")
+     * @OA\Parameter(ref="#/components/parameters/strict")
+     * @throws Exception
      */
-    public function singleAction(Request $request, string $id)
+    public function singleAction(Request $request, string $id): array
     {
         $award = $this->getAwardsData($request, $id);
 
@@ -103,13 +92,13 @@ class AwardsController extends AbstractRestController
 
     /**
      * Get the awards data for the given request and optional award ID
-     * @param Request     $request
-     * @param string|null $requestedType
-     * @return array
-     * @throws \Exception
+     * @throws Exception
      */
-    protected function getAwardsData(Request $request, string $requestedType = null)
+    protected function getAwardsData(Request $request, string $requestedType = null): ?array
     {
+        // TODO: move this to a service so the scoreboard can use its logic
+        // Probably best to do it when we implement https://github.com/DOMjudge/domjudge/issues/1079
+
         $public = !$this->dj->checkrole('api_reader');
         if ($this->dj->checkrole('api_reader') && $request->query->has('public')) {
             $public = $request->query->getBoolean('public');
@@ -128,8 +117,8 @@ class AwardsController extends AbstractRestController
         foreach ($scoreboard->getTeams() as $team) {
             $teamid = (string)$team->getApiId($this->eventLogService);
             if ($scoreboard->isBestInCategory($team)) {
-                $group_winners[$team->getCategoryId()][] = $teamid;
-                $groups[$team->getCategoryid()] = $team->getCategory()->getName();
+                $group_winners[$team->getCategory()->getCategoryId()][] = $teamid;
+                $groups[$team->getCategory()->getCategoryid()] = $team->getCategory()->getName();
             }
             foreach($scoreboard->getProblems() as $problem) {
                 $probid = (string)$problem->getApiId($this->eventLogService);
@@ -167,12 +156,14 @@ class AwardsController extends AbstractRestController
             if ($rank === 1) {
                 $overall_winners[] = $teamid;
             }
-            if ($rank <= 4 ) {
-                $medal_winners['gold'][] = $teamid;
-            } elseif ($rank <= 8 ) {
-                $medal_winners['silver'][] = $teamid;
-            } elseif ($rank <= 12 + $additionalBronzeMedals ) {
-                $medal_winners['bronze'][] = $teamid;
+            if ($contest->getMedalsEnabled() && $contest->getMedalCategories()->contains($teamScore->team->getCategory())) {
+                if ($rank <= $contest->getGoldMedals()) {
+                    $medal_winners['gold'][] = $teamid;
+                } elseif ($rank <= $contest->getGoldMedals() + $contest->getSilverMedals()) {
+                    $medal_winners['silver'][] = $teamid;
+                } elseif ($rank <= $contest->getGoldMedals() + $contest->getSilverMedals() + $contest->getBronzeMedals() + $additionalBronzeMedals) {
+                    $medal_winners['bronze'][] = $teamid;
+                }
             }
         }
         if (count($overall_winners) > 0) {
@@ -204,17 +195,11 @@ class AwardsController extends AbstractRestController
         return $results;
     }
 
-    /**
-     * @inheritdoc
-     */
     protected function getQueryBuilder(Request $request): QueryBuilder
     {
         throw new NotImplementedException();
     }
 
-    /**
-     * @inheritdoc
-     */
     protected function getIdField(): string
     {
         throw new NotImplementedException();

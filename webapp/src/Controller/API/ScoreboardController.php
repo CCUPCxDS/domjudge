@@ -13,21 +13,22 @@ use App\Utils\Scoreboard\Filter;
 use App\Utils\Scoreboard\ScoreboardMatrixItem;
 use App\Utils\Utils;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\NonUniqueResultException;
 use Doctrine\ORM\QueryBuilder;
+use Exception;
 use FOS\RestBundle\Controller\Annotations as Rest;
-use Swagger\Annotations as SWG;
+use OpenApi\Annotations as OA;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 use Symfony\Component\Intl\Exception\NotImplementedException;
 
 /**
- * @Rest\Route("/api/v4/contests/{cid}/scoreboard", defaults={ "_format" = "json" })
- * @Rest\Prefix("/api/contests/{cid}/scoreboard")
- * @Rest\NamePrefix("scoreboard_")
- * @SWG\Tag(name="Scoreboard")
- * @SWG\Parameter(ref="#/parameters/cid")
- * @SWG\Response(response="404", ref="#/definitions/NotFound")
- * @SWG\Response(response="401", ref="#/definitions/Unauthorized")
+ * @Rest\Route("/contests/{cid}/scoreboard")
+ * @OA\Tag(name="Scoreboard")
+ * @OA\Parameter(ref="#/components/parameters/cid")
+ * @OA\Response(response="404", ref="#/components/responses/NotFound")
+ * @OA\Response(response="401", ref="#/components/responses/Unauthorized")
+ * @OA\Response(response="400", ref="#/components/responses/InvalidResponse")
  */
 class ScoreboardController extends AbstractRestController
 {
@@ -36,15 +37,6 @@ class ScoreboardController extends AbstractRestController
      */
     protected $scoreboardService;
 
-    /**
-     * ScoreboardController constructor.
-     *
-     * @param EntityManagerInterface $entityManager
-     * @param DOMJudgeService        $DOMJudgeService
-     * @param ConfigurationService   $config
-     * @param EventLogService        $eventLogService
-     * @param ScoreboardService      $scoreboardService
-     */
     public function __construct(
         EntityManagerInterface $entityManager,
         DOMJudgeService $DOMJudgeService,
@@ -58,54 +50,52 @@ class ScoreboardController extends AbstractRestController
 
     /**
      * Get the scoreboard for this contest
-     * @param Request $request
-     * @return array
      * @Rest\Get("")
-     * @SWG\Response(
+     * @OA\Response(
      *     response="200",
      *     description="Returns the scoreboard",
-     *     @SWG\Schema(ref="#/definitions/Scoreboard")
+     *     @OA\JsonContent(ref="#/components/schemas/Scoreboard")
      * )
-     * @SWG\Parameter(
+     * @OA\Parameter(
      *     name="allteams",
      *     in="query",
-     *     type="boolean",
-     *     description="Also show invisble teams. Requires jury privileges"
+     *     description="Also show invisible teams. Requires jury privileges",
+     *     @OA\Schema(type="boolean")
      * )
-     * @SWG\Parameter(
+     * @OA\Parameter(
      *     name="category",
      *     in="query",
-     *     type="integer",
-     *     description="Get the scoreboard for only this category"
+     *     description="Get the scoreboard for only this category",
+     *     @OA\Schema(type="integer")
      * )
-     * @SWG\Parameter(
+     * @OA\Parameter(
      *     name="country",
      *     in="query",
-     *     type="string",
-     *     description="Get the scoreboard for only this country (in ISO 3166-1 alpha-3 format)"
+     *     description="Get the scoreboard for only this country (in ISO 3166-1 alpha-3 format)",
+     *     @OA\Schema(type="string")
      * )
-     * @SWG\Parameter(
+     * @OA\Parameter(
      *     name="affiliation",
      *     in="query",
-     *     type="integer",
-     *     description="Get the scoreboard for only this affiliation"
+     *     description="Get the scoreboard for only this affiliation",
+     *     @OA\Schema(type="integer")
      * )
-     * @SWG\Parameter(
+     * @OA\Parameter(
      *     name="public",
      *     in="query",
-     *     type="boolean",
-     *     description="Show publicly visible scoreboard, even for users with more permissions"
+     *     description="Show publicly visible scoreboard, even for users with more permissions",
+     *     @OA\Schema(type="boolean")
      * )
-     * @SWG\Parameter(
+     * @OA\Parameter(
      *     name="sortorder",
      *     in="query",
-     *     type="integer",
-     *     description="The sort order to get the scoreboard for. If not given, uses the lowest sortorder"
+     *     description="The sort order to get the scoreboard for. If not given, uses the lowest sortorder",
+     *     @OA\Schema(type="integer")
      * )
-     * @throws \Doctrine\ORM\NonUniqueResultException
-     * @throws \Exception
+     * @throws NonUniqueResultException
+     * @throws Exception
      */
-    public function getScoreboardAction(Request $request)
+    public function getScoreboardAction(Request $request) : array
     {
         $filter = new Filter();
         if ($request->query->has('category')) {
@@ -136,12 +126,8 @@ class ScoreboardController extends AbstractRestController
         }
 
         /** @var Contest $contest */
-        $contest         = $this->em->getRepository(Contest::class)->find($this->getContestId($request));
-        $inactiveAllowed = $this->isGranted('ROLE_API_READER');
-        $accessAllowed   = ($inactiveAllowed && $contest->getEnabled()) || (!$inactiveAllowed && $contest->isActive());
-        if (!$accessAllowed) {
-            throw new AccessDeniedHttpException();
-        }
+        // also checks access of user to the contest via getContestQueryBuilder() from superclass
+        $contest = $this->em->getRepository(Contest::class)->find($this->getContestId($request));
 
         // Get the event for this scoreboard
         // TODO: add support for after_event_id
@@ -220,17 +206,11 @@ class ScoreboardController extends AbstractRestController
         return $results;
     }
 
-    /**
-     * @inheritdoc
-     */
     protected function getQueryBuilder(Request $request): QueryBuilder
     {
         throw new NotImplementedException();
     }
 
-    /**
-     * @inheritdoc
-     */
     protected function getIdField(): string
     {
         throw new NotImplementedException();

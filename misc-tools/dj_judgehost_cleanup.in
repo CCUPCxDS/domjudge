@@ -7,11 +7,11 @@
 set -e
 
 JUDGINGDIR=$(readlink -fn @judgehost_judgedir@)
-PROGNAME=$(basename $0)
+PROGNAME=$(basename "$0")
 
 usage()
 {
-	cat <<EOF
+    cat <<EOF
 Usage: $PROGNAME <command>
 Perform various cleanup tasks on a judgehost.
 
@@ -34,73 +34,72 @@ Commands:
 EOF
 }
 
-if [ `id -u` -ne 0 ]; then
-	echo "This program must be run as root."
-	echo
-	usage
-	exit 1
+if [ "$(id -u)" -ne 0 ]; then
+    echo "This program must be run as root."
+    echo
+    usage
+    exit 1
 fi
 
 case $1 in
-	mount*)
-		echo "Cleaning up stale mounts..."
-		for i in $(cat /proc/mounts | cut -d ' ' -f 2 | grep -E "^$JUDGINGDIR/") ; do
-			umount $i
-			echo "Unmounted $i"
-			sleep 0.1
-		done
-		echo "Done."
-		;;
+    mount*)
+        echo "Cleaning up stale mounts..."
+        cut -d ' ' -f 2 /proc/mounts | grep -E "^$JUDGINGDIR" | while IFS= read -r mountpoint; do
+            umount "$mountpoint"
+            echo "Unmounted $mountpoint"
+            sleep 0.1
+        done
+        echo "Done."
+        ;;
 
-	cache)
-		echo "Cleaning up cached data..."
-		cd "$JUDGINGDIR"
-		for d in */*; do
-			[ -d "$d" ] || continue
-			cd "$d"
-			echo "  in $d:"
-			for i in testcase executable; do
-				if [ -d "$i/" ]; then
-					echo "    removing $i cache"
-					rm -rf "$i/"
-				fi
-			done
-			cd - >/dev/null
-		done
-		echo "Done."
-		;;
+    cache)
+        echo "Cleaning up cached data..."
+        cd "$JUDGINGDIR"
+        for d in */*; do
+            [ -d "$d" ] || continue
+            cd "$d"
+            echo "  in $d:"
+            for i in testcase executable; do
+                if [ -d "$i/" ]; then
+                    echo "    removing $i cache"
+                    rm -rf "${i:?}/"
+                fi
+            done
+            cd - >/dev/null
+        done
+        echo "Done."
+        ;;
 
-	judging*)
-		if cat /proc/mounts | cut -d ' ' -f 2 | grep -E "^$JUDGINGDIR/" >/dev/null 2>&1 ; then
-			echo "There are (stale) bind mounts under $JUDGINGDIR/."
-			echo "Make sure that all judgedaemons on this host are stopped, and then"
-			echo "run '$PROGNAME mount' to clean up any stale bind mounts."
-			exit 1
-		fi
-		echo "Cleaning up judging data..."
-		cd "$JUDGINGDIR"
-		for d in */*; do
-			[ -d "$d" ] || continue
-			cd "$d"
-			echo "  in $d:"
-			for i in $(ls -d * 2>/dev/null | grep -E '^[0-9]+$' || true); do
-				[ -d "$i" ] || continue
-				echo "    removing judging data for contest $i"
-				rm -rf "$i/"
-			done
-			cd - >/dev/null
-		done
-		echo "Done."
-		;;
+    judging*)
+        if cut -d ' ' -f 2 /proc/mounts | grep -E "^$JUDGINGDIR/" >/dev/null 2>&1; then
+            echo "There are (stale) bind mounts under $JUDGINGDIR/."
+            echo "Make sure that all judgedaemons on this host are stopped, and then"
+            echo "run '$PROGNAME mount' to clean up any stale bind mounts."
+            exit 1
+        fi
+        echo "Cleaning up judging data..."
+        cd "$JUDGINGDIR"
+        for d in */*; do
+            [ -d "$d" ] || continue
+            cd "$d"
+            echo "  in $d:"
+            find . -maxdepth 1 -type d -regex '\./[0-9]+' | while IFS= read -r contest; do
+                echo "    removing judging data for contest $contest"
+                rm -rf "${contest:?}/"
+            done
+            cd - >/dev/null
+        done
+        echo "Done."
+        ;;
 
-	help|--help)
-		usage
-		;;
+    help|--help)
+        usage
+        ;;
 
-	*)
-		echo "Unknown command '$1'."
-		echo
-		usage
-		exit 1
-		;;
+    *)
+        echo "Unknown command '$1'."
+        echo
+        usage
+        exit 1
+        ;;
 esac

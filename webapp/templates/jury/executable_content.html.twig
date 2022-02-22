@@ -23,12 +23,12 @@
         </div>
     {% endif %}
 
-    <ul class="nav nav-tabs source-tab-nav">
+    <ul class="nav nav-tabs source-tab-nav" role="tablist">
         {%- for idx, filename in filenames %}
 
             <li class="nav-item">
                 <a class="nav-link {% if loop.first %}active{% endif %}" data-toggle="tab"
-                   href="#source-{{ idx }}" role="tab">{{ filename }}</a>
+                   href="#source-{{ idx }}" role="tab">{{ filename }}{% if (executableBits[idx]) %} <sub>x-bit</sub>{% endif %}</a>
             </li>
         {%- endfor %}
 

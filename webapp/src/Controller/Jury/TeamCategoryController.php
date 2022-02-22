@@ -11,9 +11,14 @@ use App\Service\DOMJudgeService;
 use App\Service\EventLogService;
 use App\Service\SubmissionService;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\NonUniqueResultException;
+use Doctrine\ORM\NoResultException;
+use Exception;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\IsGranted;
 use Symfony\Component\Asset\Packages;
+use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\HttpKernel\KernelInterface;
 use Symfony\Component\PropertyAccess\PropertyAccess;
@@ -50,15 +55,6 @@ class TeamCategoryController extends BaseController
      */
     protected $eventLogService;
 
-    /**
-     * TeamCategoryController constructor.
-     *
-     * @param EntityManagerInterface $em
-     * @param DOMJudgeService        $dj
-     * @param ConfigurationService   $config
-     * @param KernelInterface        $kernel
-     * @param EventLogService        $eventLogService
-     */
     public function __construct(
         EntityManagerInterface $em,
         DOMJudgeService $dj,
@@ -76,7 +72,7 @@ class TeamCategoryController extends BaseController
     /**
      * @Route("", name="jury_team_categories")
      */
-    public function indexAction(Request $request, Packages $assetPackage)
+    public function indexAction(Request $request, Packages $assetPackage): Response
     {
         $em             = $this->em;
         $teamCategories = $em->createQueryBuilder()
@@ -155,14 +151,10 @@ class TeamCategoryController extends BaseController
 
     /**
      * @Route("/{categoryId<\d+>}", name="jury_team_category")
-     * @param Request           $request
-     * @param SubmissionService $submissionService
-     * @param int               $categoryId
-     * @return \Symfony\Component\HttpFoundation\Response
-     * @throws \Doctrine\ORM\NoResultException
-     * @throws \Doctrine\ORM\NonUniqueResultException
+     * @throws NoResultException
+     * @throws NonUniqueResultException
      */
-    public function viewAction(Request $request, SubmissionService $submissionService, int $categoryId)
+    public function viewAction(Request $request, SubmissionService $submissionService, int $categoryId) : Response
     {
         /** @var TeamCategory $teamCategory */
         $teamCategory = $this->em->getRepository(TeamCategory::class)->find($categoryId);
@@ -172,7 +164,7 @@ class TeamCategoryController extends BaseController
 
         $restrictions = ['categoryid' => $teamCategory->getCategoryid()];
         /** @var Submission[] $submissions */
-        list($submissions, $submissionCounts) = $submissionService->getSubmissionList(
+        [$submissions, $submissionCounts] = $submissionService->getSubmissionList(
             $this->dj->getCurrentContests(),
             $restrictions
         );
@@ -203,10 +195,8 @@ class TeamCategoryController extends BaseController
     /**
      * @Route("/{categoryId<\d+>}/edit", name="jury_team_category_edit")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @param int     $categoryId
-     * @return \Symfony\Component\HttpFoundation\RedirectResponse|\Symfony\Component\HttpFoundation\Response
-     * @throws \Exception
+     * @return RedirectResponse|Response
+     * @throws Exception
      */
     public function editAction(Request $request, int $categoryId)
     {
@@ -236,10 +226,8 @@ class TeamCategoryController extends BaseController
     /**
      * @Route("/{categoryId<\d+>}/delete", name="jury_team_category_delete")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @param int     $categoryId
-     * @return \Symfony\Component\HttpFoundation\RedirectResponse|\Symfony\Component\HttpFoundation\Response
-     * @throws \Exception
+     * @return RedirectResponse|Response
+     * @throws Exception
      */
     public function deleteAction(Request $request, int $categoryId)
     {
@@ -249,18 +237,16 @@ class TeamCategoryController extends BaseController
             throw new NotFoundHttpException(sprintf('Team category with ID %s not found', $categoryId));
         }
 
-        return $this->deleteEntity($request, $this->em, $this->dj, $this->eventLogService, $this->kernel,
-                                   $teamCategory, $teamCategory->getName(), $this->generateUrl('jury_team_categories'));
+        return $this->deleteEntities($request, $this->em, $this->dj, $this->eventLogService, $this->kernel,
+                                     [$teamCategory], $this->generateUrl('jury_team_categories'));
     }
 
     /**
      * @Route("/add", name="jury_team_category_add")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @return \Symfony\Component\HttpFoundation\Response
-     * @throws \Exception
+     * @throws Exception
      */
-    public function addAction(Request $request)
+    public function addAction(Request $request) : Response
     {
         $teamCategory = new TeamCategory();
 
@@ -270,8 +256,7 @@ class TeamCategoryController extends BaseController
 
         if ($form->isSubmitted() && $form->isValid()) {
             $this->em->persist($teamCategory);
-            $this->saveEntity($this->em, $this->eventLogService, $this->dj, $teamCategory,
-                              $teamCategory->getCategoryid(), true);
+            $this->saveEntity($this->em, $this->eventLogService, $this->dj, $teamCategory, null, true);
             return $this->redirectToRoute('jury_team_category', ['categoryId' => $teamCategory->getCategoryid()]);
         }
 

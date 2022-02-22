@@ -7,8 +7,6 @@ use App\Entity\Contest;
 /**
  * Class FreezeData
  *
- * This class is loosely based on lib/lib.misc.php:calcFreezeData()
- *
  * @package App\Utils
  */
 class FreezeData
@@ -182,5 +180,4 @@ class FreezeData
         $duration = Utils::difftime((float)$this->contest->getStarttime(), (float)$this->contest->getEndtime());
         return (int)($passed * 100. / $duration);
     }
-
 }

@@ -2,6 +2,7 @@
 
 namespace App\Form\Type;
 
+use App\Entity\Role;
 use App\Entity\Team;
 use App\Entity\TeamAffiliation;
 use App\Entity\TeamCategory;
@@ -11,6 +12,7 @@ use App\Service\DOMJudgeService;
 use App\Utils\Utils;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\EntityRepository;
+use stdClass;
 use Symfony\Bridge\Doctrine\Form\Type\EntityType;
 use Symfony\Component\Form\AbstractType;
 use Symfony\Component\Form\Extension\Core\Type\ChoiceType;
@@ -21,6 +23,9 @@ use Symfony\Component\Form\Extension\Core\Type\SubmitType;
 use Symfony\Component\Form\Extension\Core\Type\TextType;
 use Symfony\Component\Form\Form;
 use Symfony\Component\Form\FormBuilderInterface;
+use Symfony\Component\Form\FormEvent;
+use Symfony\Component\Form\FormEvents;
+use Symfony\Component\Intl\Countries;
 use Symfony\Component\OptionsResolver\OptionsResolver;
 use Symfony\Component\Validator\Constraints\Callback;
 use Symfony\Component\Validator\Constraints\Email;
@@ -71,6 +76,15 @@ class UserRegistrationType extends AbstractType
                 'label' => false,
                 'attr' => [
                     'placeholder' => 'Username',
+                    'autocomplete' => 'username',
+                ],
+            ])
+            ->add('name', TextType::class, [
+                'label' => false,
+                'required' => false,
+                'attr' => [
+                    'placeholder' => 'Full name (optional)',
+                    'autocomplete' => 'name',
                 ],
             ])
             ->add('email', EmailType::class, [
@@ -78,6 +92,7 @@ class UserRegistrationType extends AbstractType
                 'required' => false,
                 'attr' => [
                     'placeholder' => 'Email address (optional)',
+                    'autocomplete' => 'email',
                 ],
                 'constraints' => new Email(),
             ])
@@ -124,8 +139,9 @@ class UserRegistrationType extends AbstractType
 
         if ($this->config->get('show_affiliations')) {
             $countries = [];
-            foreach (Utils::ALPHA3_COUNTRIES as $alpha3 => $country) {
-                $countries["$country ($alpha3)"] = $alpha3;
+            foreach (Countries::getAlpha3Codes() as $alpha3) {
+                $name = Countries::getAlpha3Name($alpha3);
+                $countries["$name ($alpha3)"] = $alpha3;
             }
 
             $builder
@@ -196,6 +212,20 @@ class UserRegistrationType extends AbstractType
                 ],
             ]);
 
+        // Make sure the user has the team role to make validation work
+        $builder->addEventListener(FormEvents::PRE_SET_DATA, function (FormEvent $event) {
+            /** @var User $user */
+            $user = $event->getData();
+            /** @var Role $role */
+            $role = $this->em->createQueryBuilder()
+                ->from(Role::class, 'r')
+                ->select('r')
+                ->andWhere('r.dj_role = :team')
+                ->setParameter(':team', 'team')
+                ->getQuery()
+                ->getOneOrNullResult();
+            $user->addUserRole($role);
+        });
     }
 
     /**

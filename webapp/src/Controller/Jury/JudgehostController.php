@@ -3,16 +3,23 @@
 namespace App\Controller\Jury;
 
 use App\Controller\BaseController;
+use App\Doctrine\DBAL\Types\JudgeTaskType;
 use App\Entity\Judgehost;
+use App\Entity\JudgeTask;
 use App\Entity\Judging;
 use App\Form\Type\JudgehostsType;
 use App\Service\ConfigurationService;
 use App\Service\DOMJudgeService;
 use App\Service\EventLogService;
 use App\Utils\Utils;
+use Doctrine\DBAL\DBALException;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\NonUniqueResultException;
+use Doctrine\ORM\NoResultException;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\IsGranted;
+use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\HttpKernel\KernelInterface;
 use Symfony\Component\PropertyAccess\PropertyAccess;
@@ -52,15 +59,6 @@ class JudgehostController extends BaseController
      */
     protected $kernel;
 
-    /**
-     * JudgehostController constructor.
-     *
-     * @param EntityManagerInterface $em
-     * @param DOMJudgeService        $dj
-     * @param ConfigurationService   $config
-     * @param EventLogService        $eventLog
-     * @param KernelInterface        $kernel
-     */
     public function __construct(
         EntityManagerInterface $em,
         DOMJudgeService $dj,
@@ -78,56 +76,32 @@ class JudgehostController extends BaseController
     /**
      * @Route("", name="jury_judgehosts")
      */
-    public function indexAction(Request $request)
+    public function indexAction(Request $request): Response
     {
         /** @var Judgehost[] $judgehosts */
         $judgehosts = $this->em->createQueryBuilder()
             ->from(Judgehost::class, 'j')
-            ->leftJoin('j.restriction', 'r')
-            ->select('j', 'r')
+            ->select('j')
+            ->andWhere('j.hidden = 0')
             ->orderBy('j.hostname')
             ->getQuery()->getResult();
 
         $table_fields = [
+            'judgehostid' => ['title' => 'ID'],
             'hostname' => ['title' => 'hostname'],
             'active' => ['title' => 'active'],
             'status' => ['title' => 'status'],
-            'restriction' => ['title' => 'restriction'],
-            'load' => ['title' => 'load'],
+            'last_judgingid' => ['title' => 'last judging'],
         ];
 
         $now           = Utils::now();
         $contest       = $this->dj->getCurrentContest();
-        $query         = 'SELECT judgehost, SUM(IF(endtime, endtime, :now) - GREATEST(:from, starttime)) AS `load`
-                          FROM judging
-                          WHERE endtime > :from OR (endtime IS NULL AND (valid = 1 OR rejudgingid IS NOT NULL))
-                          GROUP BY judgehost';
-        $params        = [':now' => $now];
-
-        $params[':from'] = $now - 2 * 60;
-        $work2min        = $this->em->getConnection()->fetchAll($query, $params);
-        $params[':from'] = $now - 10 * 60;
-        $work10min       = $this->em->getConnection()->fetchAll($query, $params);
-        $params[':from'] = $contest ? $contest->getStarttime() : 0;
-        $workcontest     = $this->em->getConnection()->fetchAll($query, $params);
-
-        $map = function ($work) {
-            $result = [];
-            foreach ($work as $item) {
-                $result[$item['judgehost']] = $item['load'];
-            }
-
-            return $result;
-        };
-
-        $work2min    = $map($work2min);
-        $work10min   = $map($work10min);
-        $workcontest = $map($workcontest);
 
         $propertyAccessor = PropertyAccess::createPropertyAccessor();
         $time_warn = $this->config->get('judgehost_warning');
         $time_crit = $this->config->get('judgehost_critical');
         $judgehosts_table = [];
+        $all_checked_in_recently = true;
         foreach ($judgehosts as $judgehost) {
             $judgehostdata    = [];
             $judgehostactions = [];
@@ -148,6 +122,7 @@ class JudgehostController extends BaseController
             if (empty($judgehost->getPolltime())) {
                 $status = 'noconn';
                 $statustitle = "never checked in";
+                $all_checked_in_recently = false;
             } else {
                 $relTime = floor(Utils::difftime($now, (float)$judgehost->getPolltime()));
                 if ($relTime < $time_warn) {
@@ -156,40 +131,34 @@ class JudgehostController extends BaseController
                     $status = 'warn';
                 } else {
                     $status = 'crit';
+                    $all_checked_in_recently = false;
                 }
                 $statustitle = sprintf('last checked in %ss ago',
                                        Utils::printtimediff((float)$judgehost->getPolltime()));
             }
 
-            $load = sprintf(
-                '%.2f&nbsp;%.2f&nbsp;',
-                ($work2min[$judgehost->getHostname()] ?? 0) / (2 * 60),
-                ($work10min[$judgehost->getHostname()] ?? 0) / (10 * 60)
-            );
-            if ( $contest ) {
-                $contestLength = Utils::difftime($now, (float)$contest->getStarttime());
-                $load .= sprintf(
-                    '%.2f',
-                    ($workcontest[$judgehost->getHostname()] ?? 0) / $contestLength
-                );
-            } else {
-                $load .= 'N/A';
-            }
+            $lastJobId = $this->em->createQueryBuilder()
+                ->from(JudgeTask::class, 'jt')
+                ->select('jt.jobid')
+                ->andWhere('jt.judgehost = :judgehost')
+                ->andWhere('jt.type = :type')
+                ->setParameter(':judgehost', $judgehost)
+                ->setParameter(':type', JudgeTaskType::JUDGING_RUN)
+                ->orderBy('jt.starttime', 'DESC')
+                ->setMaxResults(1)
+                ->getQuery()
+                ->getOneOrNullResult();
+            $judgehostdata['last_judgingid'] = $lastJobId === null ? null : [
+                'value' => 'j' . $lastJobId['jobid'],
+            ];
 
             $judgehostdata = array_merge($judgehostdata, [
                 'status' => [
                     'value' => $status,
                     'title' => $statustitle,
                 ],
-                'load' => [
-                    'title' => 'load during the last 2 and 10 minutes and the whole contest',
-                    'value' => $load,
-                ],
                 'active' => [
                     'value' => $judgehost->getActive() ? 'yes' : 'no',
-                ],
-                'restriction' => [
-                    'value' => $judgehost->getRestriction() ? $judgehost->getRestriction()->getName() : '<i>none</i>',
                 ],
             ]);
 
@@ -207,14 +176,14 @@ class JudgehostController extends BaseController
                 $judgehostactions[] = [
                     'icon' => $activeicon,
                     'title' => sprintf('%s judgehost', $activecmd),
-                    'link' => $this->generateUrl($route, ['hostname' => $judgehost->getHostname()]),
+                    'link' => $this->generateUrl($route, ['judgehostid' => $judgehost->getJudgehostid()]),
                 ];
 
                 $judgehostactions[] = [
                     'icon' => 'trash-alt',
                     'title' => 'delete this judgehost',
                     'link' => $this->generateUrl('jury_judgehost_delete', [
-                        'hostname' => $judgehost->getHostname(),
+                        'judgehostid' => $judgehost->getJudgehostid(),
                     ]),
                     'ajaxModal' => true,
                 ];
@@ -224,7 +193,7 @@ class JudgehostController extends BaseController
             $judgehosts_table[] = [
                 'data' => $judgehostdata,
                 'actions' => $judgehostactions,
-                'link' => $this->generateUrl('jury_judgehost', ['hostname' => $judgehost->getHostname()]),
+                'link' => $this->generateUrl('jury_judgehost', ['judgehostid' => $judgehost->getJudgehostid()]),
                 'cssclass' => $judgehost->getActive() ? '' : 'disabled',
             ];
         }
@@ -233,6 +202,7 @@ class JudgehostController extends BaseController
             'judgehosts' => $judgehosts_table,
             'table_fields' => $table_fields,
             'num_actions' => $this->isGranted('ROLE_ADMIN') ? 2 : 0,
+            'all_checked_in_recently' => $all_checked_in_recently,
             'refresh' => [
                 'after' => 5,
                 'url' => $this->generateUrl('jury_judgehosts'),
@@ -247,26 +217,22 @@ class JudgehostController extends BaseController
     }
 
     /**
-     * @Route("/{hostname}", methods={"GET"}, name="jury_judgehost")
-     * @param Request $request
-     * @param string  $hostname
-     * @return \Symfony\Component\HttpFoundation\Response
-     * @throws \Doctrine\ORM\NonUniqueResultException
+     * @Route("/{judgehostid}", methods={"GET"}, name="jury_judgehost")
+     * @throws NonUniqueResultException
      */
-    public function viewAction(Request $request, string $hostname)
+    public function viewAction(Request $request, int $judgehostid): Response
     {
         /** @var Judgehost $judgehost */
         $judgehost = $this->em->createQueryBuilder()
             ->from(Judgehost::class, 'j')
-            ->leftJoin('j.restriction', 'r')
-            ->select('j', 'r')
-            ->andWhere('j.hostname = :hostname')
-            ->setParameter(':hostname', $hostname)
+            ->select('j')
+            ->andWhere('j.judgehostid = :judgehostid')
+            ->setParameter(':judgehostid', $judgehostid)
             ->getQuery()
             ->getOneOrNullResult();
 
         if (!$judgehost) {
-            throw new NotFoundHttpException(sprintf('Judgehost with hostname %s not found', $hostname));
+            throw new NotFoundHttpException(sprintf('Judgehost with ID %d not found', $judgehostid));
         }
 
         $reltime = floor(Utils::difftime(Utils::now(), (float)$judgehost->getPolltime()));
@@ -283,10 +249,13 @@ class JudgehostController extends BaseController
         if ($contests = $this->dj->getCurrentContest()) {
             $judgings = $this->em->createQueryBuilder()
                 ->from(Judging::class, 'j')
-                ->select('j', 'r')
+                ->select('j', 'r', 'jr', 'jt')
+                ->distinct()
+                ->innerJoin('j.runs', 'jr')
+                ->innerJoin('jr.judgetask', 'jt')
                 ->leftJoin('j.rejudging', 'r')
                 ->andWhere('j.contest IN (:contests)')
-                ->andWhere('j.judgehost = :judgehost')
+                ->andWhere('jt.judgehost = :judgehost')
                 ->setParameter(':contests', $contests)
                 ->setParameter(':judgehost', $judgehost)
                 ->orderBy('j.starttime', 'DESC')
@@ -301,7 +270,7 @@ class JudgehostController extends BaseController
             'judgings' => $judgings,
             'refresh' => [
                 'after' => 15,
-                'url' => $this->generateUrl('jury_judgehost', ['hostname' => $judgehost->getHostname()]),
+                'url' => $this->generateUrl('jury_judgehost', ['judgehostid' => $judgehost->getJudgehostid()]),
                 'ajax' => true,
             ],
         ];
@@ -313,71 +282,58 @@ class JudgehostController extends BaseController
     }
 
     /**
-     * @Route("/{hostname}/delete", name="jury_judgehost_delete")
+     * @Route("/{judgehostid}/delete", name="jury_judgehost_delete")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @param string  $hostname
-     * @return \Symfony\Component\HttpFoundation\Response
-     * @throws \Doctrine\DBAL\DBALException
-     * @throws \Doctrine\ORM\NoResultException
-     * @throws \Doctrine\ORM\NonUniqueResultException
+     * @throws DBALException
+     * @throws NoResultException
+     * @throws NonUniqueResultException
      */
-    public function deleteAction(Request $request, string $hostname)
+    public function deleteAction(Request $request, int $judgehostid): Response
     {
         /** @var Judgehost $judgehost */
         $judgehost = $this->em->createQueryBuilder()
             ->from(Judgehost::class, 'j')
-            ->leftJoin('j.restriction', 'r')
-            ->select('j', 'r')
-            ->andWhere('j.hostname = :hostname')
-            ->setParameter(':hostname', $hostname)
+            ->select('j')
+            ->andWhere('j.judgehostid = :judgehostid')
+            ->setParameter(':judgehostid', $judgehostid)
             ->getQuery()
             ->getOneOrNullResult();
 
-        return $this->deleteEntity($request, $this->em, $this->dj, $this->eventLog, $this->kernel,
-                                   $judgehost, $judgehost->getHostname(), $this->generateUrl('jury_judgehosts'));
+        return $this->deleteEntities($request, $this->em, $this->dj, $this->eventLog, $this->kernel,
+                                     [$judgehost], $this->generateUrl('jury_judgehosts'));
     }
 
     /**
-     * @Route("/{hostname}/activate", name="jury_judgehost_activate")
+     * @Route("/{judgehostid}/activate", name="jury_judgehost_activate")
      * @IsGranted("ROLE_ADMIN")
-     * @param RouterInterface $router
-     * @param Request         $request
-     * @param string          $hostname
-     * @return \Symfony\Component\HttpFoundation\RedirectResponse
      */
-    public function activateAction(RouterInterface $router, Request $request, string $hostname)
+    public function activateAction(RouterInterface $router, Request $request, int $judgehostid): RedirectResponse
     {
-        $judgehost = $this->em->getRepository(Judgehost::class)->find($hostname);
+        $judgehost = $this->em->getRepository(Judgehost::class)->find($judgehostid);
         $judgehost->setActive(true);
         $this->em->flush();
-        $this->dj->auditlog('judgehost', $hostname, 'marked active');
+        $this->dj->auditlog('judgehost', $judgehost->getJudgehostid(), 'marked active');
         return $this->redirectToLocalReferrer($router, $request, $this->generateUrl('jury_judgehosts'));
     }
 
     /**
-     * @Route("/{hostname}/deactivate", name="jury_judgehost_deactivate")
+     * @Route("/{judgehostid}/deactivate", name="jury_judgehost_deactivate")
      * @IsGranted("ROLE_ADMIN")
-     * @param RouterInterface $router
-     * @param Request         $request
-     * @param string          $hostname
-     * @return \Symfony\Component\HttpFoundation\RedirectResponse
      */
-    public function deactivateAction(RouterInterface $router, Request $request, string $hostname)
+    public function deactivateAction(RouterInterface $router, Request $request, int $judgehostid): RedirectResponse
     {
-        $judgehost = $this->em->getRepository(Judgehost::class)->find($hostname);
+        $judgehost = $this->em->getRepository(Judgehost::class)->find($judgehostid);
         $judgehost->setActive(false);
         $this->em->flush();
-        $this->dj->auditlog('judgehost', $hostname, 'marked inactive');
+        $this->dj->auditlog('judgehost', $judgehost->getJudgehostid(), 'marked inactive');
         return $this->redirectToLocalReferrer($router, $request, $this->generateUrl('jury_judgehosts'));
     }
 
     /**
      * @Route("/activate-all", methods={"POST"}, name="jury_judgehost_activate_all")
      * @IsGranted("ROLE_ADMIN")
-     * @return \Symfony\Component\HttpFoundation\RedirectResponse
      */
-    public function activateAllAction()
+    public function activateAllAction(): RedirectResponse
     {
         $this->em->createQuery('UPDATE App\Entity\Judgehost j set j.active = true')->execute();
         $this->dj->auditlog('judgehost', null, 'marked all active');
@@ -387,9 +343,8 @@ class JudgehostController extends BaseController
     /**
      * @Route("/deactivate-all", methods={"POST"}, name="jury_judgehost_deactivate_all")
      * @IsGranted("ROLE_ADMIN")
-     * @return \Symfony\Component\HttpFoundation\RedirectResponse
      */
-    public function deactivateAllAction()
+    public function deactivateAllAction(): RedirectResponse
     {
         $this->em->createQuery('UPDATE App\Entity\Judgehost j set j.active = false')->execute();
         $this->dj->auditlog('judgehost', null, 'marked all inactive');
@@ -397,12 +352,28 @@ class JudgehostController extends BaseController
     }
 
     /**
+     * @Route("/autohide", methods={"POST"}, name="jury_judgehost_autohide")
+     * @IsGranted("ROLE_ADMIN")
+     */
+    public function autohideInactive(): RedirectResponse
+    {
+        $now = Utils::now();
+        $time_crit = $this->config->get('judgehost_critical');
+        $critical_threshold = $now - $time_crit;
+
+        $ret = $this->em->createQuery(
+            'UPDATE App\Entity\Judgehost j set j.active = false, j.hidden = true WHERE j.polltime IS NULL OR j.polltime < :threshold')
+            ->setParameter(':threshold', $critical_threshold)
+            ->execute();
+        $this->dj->auditlog('judgehost', null, 'auto-hiding judgehosts');
+        return $this->redirectToRoute('jury_judgehosts');
+    }
+
+    /**
      * @Route("/add/multiple", name="jury_judgehost_add")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @return \Symfony\Component\HttpFoundation\Response
      */
-    public function addMultipleAction(Request $request)
+    public function addMultipleAction(Request $request): Response
     {
         $judgehosts = ['judgehosts' => [new Judgehost()]];
         $form       = $this->createForm(JudgehostsType::class, $judgehosts);
@@ -412,7 +383,7 @@ class JudgehostController extends BaseController
             /** @var Judgehost $judgehost */
             foreach ($form->getData()['judgehosts'] as $judgehost) {
                 $this->em->persist($judgehost);
-                $this->dj->auditlog('judgehost', $judgehost->getHostname(), 'added');
+                $this->dj->auditlog('judgehost', $judgehost->getJudgehostid(), 'added');
             }
             $this->em->flush();
 
@@ -427,15 +398,17 @@ class JudgehostController extends BaseController
     /**
      * @Route("/edit/multiple", name="jury_judgehost_edit")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @return \Symfony\Component\HttpFoundation\Response
      */
-    public function editMultipleAction(Request $request)
+    public function editMultipleAction(Request $request) : Response
     {
         $querybuilder = $this->em->createQueryBuilder()
             ->from(Judgehost::class, 'j')
             ->select('j')
             ->orderBy('j.hostname');
+        $includeHidden = $request->get('include_hidden', true);
+        if (!$includeHidden) {
+            $querybuilder->andWhere('j.hidden = 0');
+        }
         $judgehosts   = ['judgehosts' => $querybuilder->getQuery()->getResult()];
         $form         = $this->createForm(JudgehostsType::class, $judgehosts);
         $form->handleRequest($request);

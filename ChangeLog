@@ -1,20 +1,56 @@
 DOMjudge Programming Contest Judging System
 
-Version 7.3.3 - 5 April 2021
-----------------------------
- - Fix single problem API action for non-jury members.
- - Fix reversed submission diff output.
- - Fix for browser swallowing newlines in output listings.
- - Improve feedback when submitting without team member role.
- - Fix compatibility with composer 2.0.
- - Fix compatibility with MySQL 8.
- - Fix ability to restart a not yet judged submission.
- - Fix team pages when there is no active contest.
- - Fix judgedaemon fallback run scripts for Java and Python.
- - Set doctrine server version to a safe base.
- - Decrease our default hash cost for user passwords so importing
-   many accounts at once does not take an unreasonable time.
- - Improve documentation.
+Version 8.0.0 - 30 January 2022
+-------------------------------
+ - Compilation of submissions now happens inside the chroot.
+   NOTE when upgrading: you need to install compilers and other
+   dependencies for the compile phase inside the DOMjudge chroot.
+   Also you need to remove the '--tmpdir' switch from the mktemp
+   call in the java_javac_detect compile script (when using this).
+ - Python 3 now uses pypy by default and is default enabled on new
+   installations.
+ - Improve performance with large amounts of affiliations.
+ - Judging verifier is now also available to jury users.
+ - Search for @EXPECTED_RESULTS@ marker in all submitted files
+   to validate test submissions.
+ - Allow users to specify their full name in self-registration.
+ - Add metrics API endpoint for use with Prometheus.
+ - Always show banner.png, if present, on the public scoreboard.
+ - Upgrade bundled libraries.
+ - Add problem statistics to team/public problem pages.
+ - Add support for specifying database port.
+ - Update API documentation to OpenAPI 3.
+ - Add support for loading custom CSS and JavaScript.
+ - Speed up loading team pictures and affiliation logos.
+ - Add filter on result to jury submissions page.
+ - Add API actions to create single team, team affiliation, team category and user.
+ - Add problem attachment support.
+ - Judge a single submission on multiple judgedaemons in parallel if the
+   judging queue is empty.
+ - Limit the size of the program output stored by default in the database;
+   with a button in the UI to retrieve the full output.
+ - Add new clarification handler role.
+ - Reduce cost of the hash function to handle large amounts of accounts when
+   generating or storing passwords.
+ - Improve API action to add submission to adhere to the CCS spec.
+ - Add API action to create clarification following CCS spec.
+ - Add support for showing (pending) awards on the scoreboard. Thanks @shuibinlong!
+ - Remove JudgehostRestriction feature due to new Judgehost API.
+ - Replace C++ submit client with (standalone) Python version.
+ - Remove old way to run interactive problems.
+   NOTE when upgrading: if you have an old-style interactive problem, you need
+   to convert it to the new style (see 'boolfind' example) or change it to
+   include the old run_wrapper.
+ - Replace jscolor by coloris.
+ - Created insights page in current work queue
+ - Increase performance by not dynamically loading classes.
+ - Added alternative inplace install mode
+ - Added PHP8.0 support
+ - Add option to default pause new judgedaemons
+ - Added medals to scoreboard
+ - Warn contestants if file has not been modified for some time
+ - Make public/team pages mostly WCAG2A compliant
+ - Add support to import multiple accounts per team and IP addresses for users.
 
 Version 7.3.2 - 23 November 2020
 --------------------------------

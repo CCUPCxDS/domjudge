@@ -11,9 +11,14 @@ use App\Service\DOMJudgeService;
 use App\Service\EventLogService;
 use App\Service\SubmissionService;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\NonUniqueResultException;
+use Doctrine\ORM\NoResultException;
+use Exception;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\IsGranted;
 use Symfony\Component\Asset\Packages;
+use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\HttpKernel\KernelInterface;
 use Symfony\Component\PropertyAccess\PropertyAccess;
@@ -50,15 +55,6 @@ class LanguageController extends BaseController
      */
     protected $eventLogService;
 
-    /**
-     * LanguageController constructor.
-     *
-     * @param EntityManagerInterface $em
-     * @param DOMJudgeService        $dj
-     * @param ConfigurationService   $config
-     * @param KernelInterface        $kernel
-     * @param EventLogService        $eventLogService
-     */
     public function __construct(
         EntityManagerInterface $em,
         DOMJudgeService $dj,
@@ -76,7 +72,7 @@ class LanguageController extends BaseController
     /**
      * @Route("", name="jury_languages")
      */
-    public function indexAction(Request $request, Packages $assetPackage)
+    public function indexAction(Request $request, Packages $assetPackage): Response
     {
         $em = $this->em;
         /** @var Language[] $languages */
@@ -159,11 +155,9 @@ class LanguageController extends BaseController
     /**
      * @Route("/add", name="jury_language_add")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @return \Symfony\Component\HttpFoundation\Response
-     * @throws \Exception
+     * @throws Exception
      */
-    public function addAction(Request $request)
+    public function addAction(Request $request): Response
     {
         $language = new Language();
 
@@ -192,14 +186,10 @@ class LanguageController extends BaseController
 
     /**
      * @Route("/{langId}", name="jury_language")
-     * @param Request           $request
-     * @param SubmissionService $submissionService
-     * @param string            $langId
-     * @return \Symfony\Component\HttpFoundation\Response
-     * @throws \Doctrine\ORM\NoResultException
-     * @throws \Doctrine\ORM\NonUniqueResultException
+     * @throws NoResultException
+     * @throws NonUniqueResultException
      */
-    public function viewAction(Request $request, SubmissionService $submissionService, string $langId)
+    public function viewAction(Request $request, SubmissionService $submissionService, string $langId) : Response
     {
         /** @var Language $language */
         $language = $this->em->getRepository(Language::class)->find($langId);
@@ -209,7 +199,7 @@ class LanguageController extends BaseController
 
         $restrictions = ['langid' => $language->getLangid()];
         /** @var Submission[] $submissions */
-        list($submissions, $submissionCounts) = $submissionService->getSubmissionList(
+        [$submissions, $submissionCounts] = $submissionService->getSubmissionList(
             $this->dj->getCurrentContests(),
             $restrictions
         );
@@ -239,9 +229,7 @@ class LanguageController extends BaseController
 
     /**
      * @Route("/{langId}/toggle-submit", name="jury_language_toggle_submit")
-     * @param Request $request
-     * @param string  $langId
-     * @return \Symfony\Component\HttpFoundation\RedirectResponse|\Symfony\Component\HttpFoundation\Response
+     * @return RedirectResponse|Response
      */
     public function toggleSubmitAction(Request $request, string $langId)
     {
@@ -255,15 +243,13 @@ class LanguageController extends BaseController
         $this->em->flush();
 
         $this->dj->auditlog('language', $langId, 'set allow submit',
-                                         $request->request->getBoolean('allow_submit'));
+                                         $request->request->getBoolean('allow_submit') ? 'yes' : 'no');
         return $this->redirectToRoute('jury_language', ['langId' => $langId]);
     }
 
     /**
      * @Route("/{langId}/toggle-judge", name="jury_language_toggle_judge")
-     * @param Request $request
-     * @param string  $langId
-     * @return \Symfony\Component\HttpFoundation\RedirectResponse|\Symfony\Component\HttpFoundation\Response
+     * @return RedirectResponse|Response
      */
     public function toggleJudgeAction(Request $request, string $langId)
     {
@@ -273,21 +259,24 @@ class LanguageController extends BaseController
             throw new NotFoundHttpException(sprintf('Language with ID %s not found', $langId));
         }
 
-        $language->setAllowJudge($request->request->getBoolean('allow_judge'));
+        $enabled = $request->request->getBoolean('allow_judge');
+        $language->setAllowJudge($enabled);
         $this->em->flush();
 
+        if ($enabled) {
+            $this->dj->unblockJudgeTasksForLanguage($langId);
+        }
+
         $this->dj->auditlog('language', $langId, 'set allow judge',
-                                         $request->request->getBoolean('allow_judge'));
+                                         $request->request->getBoolean('allow_judge') ? 'yes' : 'no');
         return $this->redirectToRoute('jury_language', ['langId' => $langId]);
     }
 
     /**
      * @Route("/{langId}/edit", name="jury_language_edit")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @param string  $langId
-     * @return \Symfony\Component\HttpFoundation\RedirectResponse|\Symfony\Component\HttpFoundation\Response
-     * @throws \Exception
+     * @return RedirectResponse|Response
+     * @throws Exception
      */
     public function editAction(Request $request, string $langId)
     {
@@ -302,12 +291,15 @@ class LanguageController extends BaseController
         $form->handleRequest($request);
 
         if ($form->isSubmitted() && $form->isValid()) {
-            // Normalize extensions
+            // Normalize extensions.
             if ($language->getExtensions()) {
                 $language->setExtensions(array_values($language->getExtensions()));
             }
             $this->saveEntity($this->em, $this->eventLogService, $this->dj, $language,
                               $language->getLangid(), false);
+            if ($language->getAllowJudge()) {
+                $this->dj->unblockJudgeTasksForLanguage($langId);
+            }
             return $this->redirect($this->generateUrl(
                 'jury_language',
                 ['langId' => $language->getLangid()]
@@ -325,8 +317,8 @@ class LanguageController extends BaseController
      * @IsGranted("ROLE_ADMIN")
      * @param Request $request
      * @param string  $langId
-     * @return \Symfony\Component\HttpFoundation\RedirectResponse|\Symfony\Component\HttpFoundation\Response
-     * @throws \Exception
+     * @return RedirectResponse|Response
+     * @throws Exception
      */
     public function deleteAction(Request $request, string $langId)
     {
@@ -336,9 +328,8 @@ class LanguageController extends BaseController
             throw new NotFoundHttpException(sprintf('Language with ID %s not found', $langId));
         }
 
-        return $this->deleteEntity(
-            $request, $this->em, $this->dj, $this->eventLogService, $this->kernel,
-            $language, $language->getName(), $this->generateUrl('jury_languages')
+        return $this->deleteEntities($request, $this->em, $this->dj, $this->eventLogService, $this->kernel,
+                                     [$language], $this->generateUrl('jury_languages')
         );
     }
 }

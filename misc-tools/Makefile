@@ -6,8 +6,7 @@ include $(TOPDIR)/Makefile.global
 TARGETS =
 OBJECTS =
 
-SUBST_DOMSERVER = judging_statistics balloons fix_permissions \
-                  simulate_contest
+SUBST_DOMSERVER = balloons fix_permissions
 
 SUBST_JUDGEHOST = dj_make_chroot dj_run_chroot dj_make_chroot_docker \
                   dj_judgehost_cleanup
@@ -30,7 +29,7 @@ install-judgehost:
 	$(INSTALL_PROG) -t $(DESTDIR)$(judgehost_bindir) $(SUBST_JUDGEHOST) \
 		dj_make_ubuntu_java_chroot
 
-maintainer-install:
+inplace-install:
 	for i in $(SUBST_DOMSERVER) ; do \
 		ln -sf $(CURDIR)/$$i $(domserver_bindir) ; \
 	done

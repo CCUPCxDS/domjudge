@@ -67,8 +67,6 @@ class ShadowDifferencesController extends BaseController
 
     /**
      * @Route("", name="jury_shadow_differences")
-     * @param Request $request
-     *
      * @return RedirectResponse|Response
      * @throws NoResultException
      * @throws NonUniqueResultException
@@ -82,6 +80,11 @@ class ShadowDifferencesController extends BaseController
                 'Shadow differences only supported when data_source is %d',
                 $shadowMode
             ));
+            return $this->redirectToRoute('jury_index');
+        }
+
+        if (!$this->dj->getCurrentContest()) {
+            $this->addFlash('danger', 'Shadow differences need an active contest.');
             return $this->redirectToRoute('jury_index');
         }
 
@@ -112,6 +115,7 @@ class ShadowDifferencesController extends BaseController
             ->leftJoin('s.judgings', 'j', Join::WITH, 'j.valid = 1')
             ->select('s', 'ej', 'j')
             ->andWhere('s.contest = :contest')
+            ->andWhere('s.externalid IS NOT NULL')
             ->setParameter(':contest', $contest)
             ->getQuery()
             ->getResult();
@@ -183,7 +187,7 @@ class ShadowDifferencesController extends BaseController
             }
         }
 
-        $restrictions = [];
+        $restrictions = ['with_external_id' => true];
         if ($viewTypes[$view] == 'unjudged local') {
             $restrictions['judged'] = 0;
         }
@@ -209,8 +213,10 @@ class ShadowDifferencesController extends BaseController
         $contests = [$contest->getCid() => $contest];
 
         /** @var Submission[] $submissions */
-        list($submissions, $submissionCounts) = $this->submissions->getSubmissionList(
-            $contests, $restrictions, 0
+        [$submissions, $submissionCounts] = $this->submissions->getSubmissionList(
+            $contests,
+            $restrictions,
+            0
         );
 
         $data = [

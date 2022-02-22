@@ -62,12 +62,6 @@ class MiscController extends BaseController
 
     /**
      * MiscController constructor.
-     *
-     * @param DOMJudgeService        $dj
-     * @param ConfigurationService   $config
-     * @param EntityManagerInterface $em
-     * @param ScoreboardService      $scoreboardService
-     * @param SubmissionService      $submissionService
      */
     public function __construct(
         DOMJudgeService $dj,
@@ -85,13 +79,11 @@ class MiscController extends BaseController
 
     /**
      * @Route("", name="team_index")
-     * @param Request $request
-     * @return Response
      * @throws NoResultException
      * @throws NonUniqueResultException
      * @throws Exception
      */
-    public function homeAction(Request $request)
+    public function homeAction(Request $request) : Response
     {
         $user    = $this->dj->getUser();
         $team    = $user->getTeam();
@@ -165,6 +157,7 @@ class MiscController extends BaseController
             $data['clarifications']        = $clarifications;
             $data['clarificationRequests'] = $clarificationRequests;
             $data['categories']            = $this->config->get('clar_categories');
+            $data['allowDownload']         = (bool)$this->config->get('allow_team_submission_download');
         }
 
         if ($request->isXmlHttpRequest()) {
@@ -177,14 +170,10 @@ class MiscController extends BaseController
 
     /**
      * @Route("/change-contest/{contestId<-?\d+>}", name="team_change_contest")
-     * @param Request         $request
-     * @param RouterInterface $router
-     * @param int             $contestId
-     * @return Response
      */
-    public function changeContestAction(Request $request, RouterInterface $router, int $contestId)
+    public function changeContestAction(Request $request, RouterInterface $router, int $contestId) : Response
     {
-        if ($this->isLocalReferrer($router, $request)) {
+        if ($this->isLocalReferer($router, $request)) {
             $response = new RedirectResponse($request->headers->get('referer'));
         } else {
             $response = $this->redirectToRoute('team_index');
@@ -195,11 +184,9 @@ class MiscController extends BaseController
 
     /**
      * @Route("/print", name="team_print")
-     * @param Request $request
-     * @return Response
      * @throws Exception
      */
-    public function printAction(Request $request)
+    public function printAction(Request $request) : Response
     {
         if (!$this->config->get('print_command')) {
             throw new AccessDeniedHttpException("Printing disabled in config");
@@ -241,5 +228,13 @@ class MiscController extends BaseController
             'form' => $form->createView(),
             'languages' => $languages,
         ]);
+    }
+
+    /**
+     * @Route("/docs", name="team_docs")
+     */
+    public function docsAction(): Response
+    {
+        return $this->render('team/docs.html.twig');
     }
 }

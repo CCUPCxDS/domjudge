@@ -32,33 +32,36 @@ become of importance when you run into problems.
 
    You can submit solutions in two ways:
 
-   Command-line
-     Use ``submit <filename>``. If your filename is of the form
-     ``<problem>.<extension>`` where ``<problem>`` is the
-     label of the problem and ``<extension>`` is a standard extension for
-     your language, then these will automatically be detected.
-     It will also try to auto-detect the main class (for Java and Kotlin) or the
-     main file (for Python). You can override these auto-detections;
-     for a complete reference of all options and examples, see ``submit --help``.
+     Command-line
+       Use ``submit <filename>``. If your filename is of the form
+       ``<problem>.<extension>`` where ``<problem>`` is the
+       label of the problem and ``<extension>`` is a standard extension for
+       your language, then these will automatically be detected.
+       It will also try to auto-detect the main class (for Java and Kotlin) or the
+       main file (for Python). You can override these auto-detections;
+       for a complete reference of all options and examples, see ``submit --help``.
 
-   Web interface
-     From your team page, |baseurlteam|, click the green **Submit**
-     button in the menu bar. Select the files you want to submit.
-     By default, the problem is selected from the base of the (first)
-     filename and the language from the extension. The web interface tries
-     to auto-detect the main class (for Java and Kotlin) or the main file (for
-     Python) from the file name. Double check that the guess is correct
-     before submitting.
+     Web interface
+       From your team page, |baseurlteam|, click the green **Submit**
+       button in the menu bar. Select the files you want to submit.
+       By default, the problem is selected from the base of the (first)
+       filename and the language from the extension. The web interface tries
+       to auto-detect the main class (for Java and Kotlin) or the main file (for
+       Python) from the file name. Double check that the guess is correct
+       before submitting.
 
    Viewing scores, submissions and sending and reading clarification
    requests and replies is done through the web interface at
    |baseurlteam|.
 
------------------
 
 .. raw:: pdf
 
     PageBreak
+
+.. raw:: latex
+
+    \clearpage
 
 Overview of the interface
 -------------------------
@@ -105,8 +108,7 @@ These guesses can be overruled with the options
 ``-e entry_point``.
 
 See ``submit --help`` for a complete list of all options,
-extensions and some examples.  Use ``submit --help | more``
-when the help text does not fit on one screen.
+extensions and some examples.
 
 ``submit`` will check your file and warns you for some problems:
 for example when the file has not been modified for a long time or
@@ -186,7 +188,8 @@ COMPILER-ERROR
   disabled).
   Note that when compilation takes more than |COMPILETIME| seconds,
   it is aborted and this counts as a compilation error.
-  *Compilation errors do not incur penalty time.*
+  *Compilation errors do not incur penalty time. The administrator of
+  the contest can change this scoring.*
 
 TIMELIMIT
   Your program took longer than the maximum allowed time for this
@@ -198,7 +201,7 @@ RUN-ERROR
   There was an error during the execution of your program. This can have
   a lot of different causes like division by zero, incorrectly
   addressing memory (e.g. by indexing arrays out of bounds), trying to
-  use more memory than the limit, etc.
+  use more memory than the limit, reading or writing to files, etc.
   Also check that your program exits with exit code 0!
 
 NO-OUTPUT
@@ -220,7 +223,8 @@ TOO-LATE
   stored but will not be processed anymore.
 
 The judges may have prepared multiple test files for each problem.
-DOMjudge will report back the first non-correct result as verdict.
+DOMjudge will report back the first highest priority non-correct result as verdict.
+*Your administrator can decide on different priorities for non-correct results.*
 
 Clarifications
 --------------
@@ -293,9 +297,9 @@ This will be documented in the problem description.
 Restrictions
 ````````````
 
-To prevent abuse, keep the jury system stable and give everyone
-clear and equal environments, there are some restrictions to which all
-submissions are subjected:
+Submissions are run in a sandbox to prevent abuse, keep the jury system
+stable and give everyone clear and equal environments. There
+are some restrictions to which all submissions are subjected:
 
 compile time
   Compilation of your program may take no longer than |COMPILETIME|
@@ -316,12 +320,17 @@ memory
   If your program tries to use more memory, it will most likely abort,
   resulting in a run error.
 
+creating new files
+  Do not create new files. The sandbox will not allow this and the file open
+  function will return a failure. Using the file without handling this error can
+  result in a runtime error depending on the submission language.
+
 number of processes
   You are not supposed to explicitly create multiple processes (threads). This is
   to no avail anyway, because your program has exactly 1 processor core fully
-  at its disposal. To increase stability of the system, DOMjudge
-  executes submissions in a sandbox where a maximum of |PROCLIMIT| processes
-  can be run simultaneously (including processes that started your program).
+  at its disposal. DOMjudge executes submissions in a sandbox where a maximum
+  of |PROCLIMIT| processes can be run simultaneously (including processes that
+  started your program).
 
   People who have never programmed with multiple processes (or have
   never heard of "threads") do not have to worry: a normal program
@@ -364,7 +373,7 @@ for different programming languages.
 
 .. literalinclude:: ../examples/example.c
    :language: c
-   :caption: **A solution in C**
+   :caption: *A solution in C*
 
 .. literalinclude:: ../examples/example.cc
    :language: cpp

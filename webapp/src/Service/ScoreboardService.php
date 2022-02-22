@@ -20,7 +20,10 @@ use App\Utils\Scoreboard\SingleTeamScoreboard;
 use App\Utils\Scoreboard\TeamScore;
 use App\Utils\Utils;
 use Doctrine\DBAL\Connection;
+use Doctrine\DBAL\DBALException;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\NonUniqueResultException;
+use Doctrine\ORM\NoResultException;
 use Doctrine\ORM\Query\Expr\Join;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpFoundation\Request;
@@ -163,8 +166,8 @@ class ScoreboardService
      * @param FreezeData|null $freezeData
      * @param bool            $jury
      * @return int
-     * @throws \Doctrine\ORM\NoResultException
-     * @throws \Doctrine\ORM\NonUniqueResultException
+     * @throws NoResultException
+     * @throws NonUniqueResultException
      */
     public function calculateTeamRank(
         Contest $contest,
@@ -296,7 +299,7 @@ class ScoreboardService
      * @param Team    $team
      * @param Problem $problem
      * @param bool    $updateRankCache If set to false, do not update the rankcache.
-     * @throws \Doctrine\DBAL\DBALException
+     * @throws DBALException
      * @throws \Exception
      */
     public function calculateScoreRow(
@@ -309,6 +312,14 @@ class ScoreboardService
             "ScoreboardService::calculateScoreRow '%d' '%d' '%d'",
             [ $contest->getCid(), $team->getTeamid(), $problem->getProbid() ]
         );
+
+        if (!$team->getCategory()) {
+            $this->logger->warning(
+                "Team '%d' has no category, skipping",
+                [ $team->getTeamid() ]
+            );
+            return;
+        }
 
         // First acquire an advisory lock to prevent other calls to this
         // method from interfering with our update.
@@ -332,14 +343,14 @@ class ScoreboardService
             ->from(Submission::class, 's')
             ->select('s, c')
             ->leftJoin('s.contest', 'c')
-            ->andWhere('s.teamid = :teamid')
-            ->andWhere('s.probid = :probid')
-            ->andWhere('s.cid = :cid')
+            ->andWhere('s.team = :teamid')
+            ->andWhere('s.problem = :probid')
+            ->andWhere('s.contest = :cid')
             ->andWhere('s.valid = 1')
             ->andWhere('s.submittime < c.endtime')
-            ->setParameter(':teamid', $team->getTeamid())
-            ->setParameter(':probid', $problem->getProbid())
-            ->setParameter(':cid', $contest->getCid())
+            ->setParameter(':teamid', $team)
+            ->setParameter(':probid', $problem)
+            ->setParameter(':cid', $contest)
             ->orderBy('s.submittime');
 
         if ($useExternalJudgements) {
@@ -665,18 +676,19 @@ class ScoreboardService
             ->getQuery()
             ->getResult();
 
-        $message = sprintf('<p>Recalculating all values for the scoreboard ' .
-                           'cache for contest %d (%d teams, %d problems)...</p>',
-                           $contest->getCid(), count($teams), count($problems));
-        $progressReporter($message);
-        $progressReporter('<pre>');
+        $message = sprintf('Recalculating all values for the scoreboard ' .
+            'cache for contest %s (c%d, %d teams, %d problems)...',
+            $contest->getShortname(),
+            $contest->getCid(),
+            count($teams), count($problems));
+        $progressReporter($message . "\n\n");
 
         if (count($teams) == 0) {
-            $progressReporter('No teams defined, doing nothing.</pre>');
+            $progressReporter("No teams defined, doing nothing.\n");
             return;
         }
         if (count($problems) == 0) {
-            $progressReporter('No problems defined, doing nothing.</pre>');
+            $progressReporter("No problems defined, doing nothing.\n");
             return;
         }
 
@@ -694,9 +706,7 @@ class ScoreboardService
             $this->updateRankCache($contest, $team);
         }
 
-        $progressReporter('</pre>');
-
-        $progressReporter('<p>Deleting irrelevant data...</p>');
+        $progressReporter("\nDeleting irrelevant data...");
 
         // Drop all teams and problems that do not exist in the contest
         if (!empty($problems)) {
@@ -742,7 +752,7 @@ class ScoreboardService
             'DELETE FROM rankcache WHERE cid = :cid AND teamid NOT IN (:teamIds)',
             $params, $types);
 
-        $progressReporter('<p>Done.</p>');
+        $progressReporter(" done.\n\n");
     }
 
     /**
@@ -818,21 +828,19 @@ class ScoreboardService
             /** @var Team $team */
             foreach ($category->getTeams() as $team) {
                 if ($teamaffil = $team->getAffiliation()) {
-                    $affiliations[$teamaffil->getName()] = array(
-                        'id'   => $this->eventLogService->externalIdFieldForEntity($teamaffil) ?
-                            $teamaffil->getExternalid() :
-                            $teamaffil->getAffilid(),
+                    $affiliations[$teamaffil->getName()] = [
+                        'id'   => $teamaffil->getApiId($this->eventLogService),
                         'name' => $teamaffil->getName(),
-                    );
+                    ];
                 }
             }
 
             if (empty($affiliations)) {
                 /** @var Team $team */
                 foreach ($category->getTeams() as $team) {
-                    $affiliations[$team->getEffectiveName()] = array(
+                    $affiliations[$team->getEffectiveName()] = [
                         'id' => -1,
-                        'name' => $team->getEffectiveName());
+                        'name' => $team->getEffectiveName()];
                 }
             }
             if (!empty($affiliations)) {
@@ -941,7 +949,6 @@ class ScoreboardService
         ];
 
         if ($contest) {
-
             if ($request && $response) {
                 $scoreFilter = $this->initializeScoreboardFilter($request, $response);
             } else {
@@ -1006,13 +1013,13 @@ class ScoreboardService
         if ($filter) {
             if ($filter->affiliations) {
                 $queryBuilder
-                    ->andWhere('t.affilid IN (:affiliations)')
+                    ->andWhere('t.affiliation IN (:affiliations)')
                     ->setParameter(':affiliations', $filter->affiliations);
             }
 
             if ($filter->categories) {
                 $queryBuilder
-                    ->andWhere('t.categoryid IN (:categories)')
+                    ->andWhere('t.category IN (:categories)')
                     ->setParameter(':categories', $filter->categories);
             }
 
@@ -1123,7 +1130,7 @@ class ScoreboardService
      * @param Contest $contest
      * @param Team    $team
      * @return RankCache|null
-     * @throws \Doctrine\ORM\NonUniqueResultException
+     * @throws NonUniqueResultException
      */
     protected function getRankcache(Contest $contest, Team $team)
     {

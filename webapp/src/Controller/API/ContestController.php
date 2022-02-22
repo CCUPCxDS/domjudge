@@ -5,20 +5,25 @@ namespace App\Controller\API;
 use App\Entity\Contest;
 use App\Entity\ContestProblem;
 use App\Entity\Event;
+use App\Service\AssetUpdateService;
 use App\Service\ConfigurationService;
 use App\Service\DOMJudgeService;
 use App\Service\EventLogService;
 use App\Service\ImportExportService;
 use App\Utils\Utils;
+use Doctrine\Inflector\InflectorFactory;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\NonUniqueResultException;
+use Doctrine\ORM\NoResultException;
 use Doctrine\ORM\QueryBuilder;
+use Exception;
 use FOS\RestBundle\Controller\Annotations as Rest;
 use JMS\Serializer\Metadata\PropertyMetadata;
 use Metadata\MetadataFactoryInterface;
 use Nelmio\ApiDocBundle\Annotation\Model;
+use OpenApi\Annotations as OA;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\IsGranted;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\Security;
-use Swagger\Annotations as SWG;
 use Symfony\Component\HttpFoundation\File\UploadedFile;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -28,16 +33,15 @@ use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\HttpKernel\KernelInterface;
-use Symfony\Component\Inflector\Inflector;
+use Symfony\Component\Validator\Validator\ValidatorInterface;
 use Symfony\Component\Yaml\Yaml;
 
 /**
- * @Rest\Route("/api/v4/contests", defaults={ "_format" = "json" })
- * @Rest\Prefix("/api/contests")
- * @Rest\NamePrefix("contest_")
- * @SWG\Tag(name="Contests")
- * @SWG\Response(response="404", ref="#/definitions/NotFound")
- * @SWG\Response(response="401", ref="#/definitions/Unauthorized")
+ * @Rest\Route("/contests")
+ * @OA\Tag(name="Contests")
+ * @OA\Response(response="404", ref="#/components/responses/NotFound")
+ * @OA\Response(response="401", ref="#/components/responses/Unauthorized")
+ * @OA\Response(response="400", ref="#/components/responses/InvalidResponse")
  */
 class ContestController extends AbstractRestController
 {
@@ -47,145 +51,295 @@ class ContestController extends AbstractRestController
     protected $importExportService;
 
     /**
-     * @param EntityManagerInterface $entityManager
-     * @param DOMJudgeService        $dj
-     * @param ConfigurationService   $config
-     * @param EventLogService        $eventLogService
-     * @param ImportExportService    $importExportService
+     * @var AssetUpdateService
      */
+    protected $assetUpdater;
+
     public function __construct(
         EntityManagerInterface $entityManager,
         DOMJudgeService $dj,
         ConfigurationService $config,
         EventLogService $eventLogService,
-        ImportExportService $importExportService
+        ImportExportService $importExportService,
+        AssetUpdateService $assetUpdater
     ) {
         parent::__construct($entityManager, $dj, $config, $eventLogService);
         $this->importExportService = $importExportService;
+        $this->assetUpdater = $assetUpdater;
     }
 
     /**
-     * Add one or more contests.
-     * @param Request $request
-     * @return string
+     * Add a new contest.
      * @Rest\Post("")
      * @IsGranted("ROLE_ADMIN")
-     * @SWG\Post(consumes={"multipart/form-data"})
-     * @SWG\Parameter(
-     *     name="yaml",
-     *     in="formData",
-     *     type="file",
+     * @OA\Post()
+     * @OA\RequestBody(
      *     required=true,
-     *     description="The contest.yaml files to import."
+     *     @OA\MediaType(
+     *         mediaType="multipart/form-data",
+     *         @OA\Schema(
+     *             @OA\Property(
+     *                 property="yaml",
+     *                 type="string",
+     *                 format="binary",
+     *                 description="The contest.yaml file to import."
+     *             ),
+     *             @OA\Property(
+     *                 property="json",
+     *                 type="string",
+     *                 format="binary",
+     *                 description="The contest.json file to import."
+     *             )
+     *         )
+     *     )
      * )
-     * @SWG\Response(
+     * @OA\Response(
      *     response="200",
-     *     description="Returns a (currently meaningless) status message.",
+     *     description="Returns the API ID of the added contest.",
      * )
      * @throws BadRequestHttpException
      */
-    public function addContestAction(Request $request)
+    public function addContestAction(Request $request) : string
     {
         /** @var UploadedFile $yamlFile */
         $yamlFile = $request->files->get('yaml') ?: [];
-        $data = Yaml::parseFile($yamlFile->getRealPath(), Yaml::PARSE_DATETIME);
-        if ($this->importExportService->importContestYaml($data, $message, $cid)) {
-            return $cid;
-        } else {
-            throw new BadRequestHttpException("Error while adding contest: $message");
+        /** @var UploadedFile $jsonFile */
+        $jsonFile = $request->files->get('json') ?: [];
+        if ((!$yamlFile && !$jsonFile) || ($yamlFile && $jsonFile)) {
+            throw new BadRequestHttpException('Supply exactly one of \'json\' or \'yaml\'');
         }
+        $message = null;
+        if ($yamlFile) {
+            $data = Yaml::parseFile($yamlFile->getRealPath(), Yaml::PARSE_DATETIME);
+            if ($this->importExportService->importContestData($data, $message, $cid)) {
+                return $cid;
+            }
+        } elseif ($jsonFile) {
+            $data = json_decode(file_get_contents($jsonFile->getRealPath()), true);
+            if ($this->importExportService->importContestData($data, $message, $cid)) {
+                return $cid;
+            }
+        }
+        throw new BadRequestHttpException("Error while adding contest: $message");
     }
 
     /**
-     * Get all the active contests
-     * @param Request $request
-     * @return Response
+     * Get all the contests
      * @Rest\Get("")
-     * @SWG\Response(
+     * @OA\Response(
      *     response="200",
-     *     description="Returns all the active contests",
-     *     @SWG\Schema(
+     *     description="Returns all contests visible to the user (all contests for privileged users, active contests otherwise)",
+     *     @OA\JsonContent(
      *         type="array",
-     *         @SWG\Items(ref=@Model(type=Contest::class))
+     *         @OA\Items(
+     *             allOf={
+     *                 @OA\Schema(ref=@Model(type=Contest::class)),
+     *                 @OA\Schema(ref="#/components/schemas/Banner")
+     *             }
+     *         )
      *     )
      * )
-     * @SWG\Parameter(ref="#/parameters/idlist")
-     * @SWG\Parameter(ref="#/parameters/strict")
-     * @throws \Doctrine\ORM\NonUniqueResultException
+     * @OA\Parameter(ref="#/components/parameters/idlist")
+     * @OA\Parameter(ref="#/components/parameters/strict")
+     * @OA\Parameter(
+     *     name="onlyActive",
+     *     in="query",
+     *     description="Whether to only return data pertaining to contests that are active",
+     *     @OA\Schema(type="boolean", default=false)
+     * )
+     * @throws NonUniqueResultException
      */
-    public function listAction(Request $request)
+    public function listAction(Request $request) : Response
     {
         return parent::performListAction($request);
     }
 
     /**
      * Get the given contest
-     * @param Request $request
-     * @param string  $cid
-     * @return Response
-     * @throws \Doctrine\ORM\NonUniqueResultException
+     * @throws NonUniqueResultException
      * @Rest\Get("/{cid}")
-     * @SWG\Response(
+     * @OA\Response(
      *     response="200",
      *     description="Returns the given contest",
-     *     @Model(type=Contest::class)
+     *     @OA\JsonContent(
+     *         allOf={
+     *             @OA\Schema(ref=@Model(type=Contest::class)),
+     *             @OA\Schema(ref="#/components/schemas/Banner")
+     *         }
+     *     )
      * )
-     * @SWG\Parameter(ref="#/parameters/cid")
-     * @SWG\Parameter(ref="#/parameters/strict")
+     * @OA\Parameter(ref="#/components/parameters/cid")
+     * @OA\Parameter(ref="#/components/parameters/strict")
      */
-    public function singleAction(Request $request, string $cid)
+    public function singleAction(Request $request, string $cid) : Response
     {
         return parent::performSingleAction($request, $cid);
+    }
+
+    /**
+     * Get the banner for the given contest
+     * @Rest\Get("/{id}/banner", name="contest_banner")
+     * @OA\Response(
+     *     response="200",
+     *     description="Returns the given contest banner in PNG, JPG or SVG format",
+     *     @OA\MediaType(mediaType="image/png"),
+     *     @OA\MediaType(mediaType="image/jpeg"),
+     *     @OA\MediaType(mediaType="image/svg+xml")
+     * )
+     * @OA\Parameter(ref="#/components/parameters/id")
+     */
+    public function bannerAction(Request $request, string $id): Response
+    {
+        /** @var Contest $contest */
+        $contest = $this->getQueryBuilder($request)
+            ->andWhere(sprintf('%s = :id', $this->getIdField()))
+            ->setParameter(':id', $id)
+            ->getQuery()
+            ->getOneOrNullResult();
+
+        if ($contest === null) {
+            throw new NotFoundHttpException(sprintf('Object with ID \'%s\' not found', $id));
+        }
+
+        $banner = $this->dj->assetPath($id, 'contest', true);
+
+        if (!file_exists($banner)) {
+            throw new NotFoundHttpException('Contest banner not found');
+        }
+
+        return static::sendBinaryFileResponse($request, $banner);
+    }
+
+    /**
+     * Delete the banner for the given contest
+     * @Rest\Delete("/{id}/banner", name="delete_contest_banner")
+     * @IsGranted("ROLE_ADMIN")
+     * @OA\Response(response="204", description="Deleting banner succeeded")
+     * @OA\Parameter(ref="#/components/parameters/id")
+     */
+    public function deleteBannerAction(Request $request, string $id): Response
+    {
+        /** @var Contest $contest */
+        $contest = $this->getQueryBuilder($request)
+            ->andWhere(sprintf('%s = :id', $this->getIdField()))
+            ->setParameter(':id', $id)
+            ->getQuery()
+            ->getOneOrNullResult();
+
+        if ($contest === null) {
+            throw new NotFoundHttpException(sprintf('Object with ID \'%s\' not found', $id));
+        }
+
+        $contest->setClearBanner(true);
+
+        $this->assetUpdater->updateAssets($contest);
+        $this->eventLogService->log('contests', $contest->getCid(), EventLogService::ACTION_UPDATE,
+            $contest->getCid());
+
+        return new Response('', Response::HTTP_NO_CONTENT);
+    }
+
+    /**
+     * Set the banner for the given contest
+     * @Rest\POST("/{id}/banner", name="post_contest_banner")
+     * @Rest\PUT("/{id}/banner", name="put_contest_banner")
+     * @OA\RequestBody(
+     *     required=true,
+     *     @OA\MediaType(
+     *         mediaType="multipart/form-data",
+     *         @OA\Schema(
+     *             required={"banner"},
+     *             @OA\Property(
+     *                 property="banner",
+     *                 type="string",
+     *                 format="binary",
+     *                 description="The banner to use."
+     *             )
+     *         )
+     *     )
+     * )
+     * @IsGranted("ROLE_ADMIN")
+     * @OA\Response(response="400", description="Invalid data provided")
+     * @OA\Response(response="204", description="Setting banner succeeded")
+     * @OA\Parameter(ref="#/components/parameters/id")
+     */
+    public function setBannerAction(Request $request, string $id, ValidatorInterface $validator): Response
+    {
+        /** @var Contest $contest */
+        $contest = $this->getQueryBuilder($request)
+            ->andWhere(sprintf('%s = :id', $this->getIdField()))
+            ->setParameter(':id', $id)
+            ->getQuery()
+            ->getOneOrNullResult();
+
+        if ($contest === null) {
+            throw new NotFoundHttpException(sprintf('Object with ID \'%s\' not found', $id));
+        }
+
+        /** @var UploadedFile $banner */
+        $banner = $request->files->get('banner');
+
+        if (!$banner) {
+            return new JsonResponse(['title' => 'Validation failed', 'errors' => ['Please supply a banner']], Response::HTTP_BAD_REQUEST);
+        }
+
+        $contest->setBannerFile($banner);
+
+        if ($errorResponse = $this->responseForErrors($validator->validate($contest), true)) {
+            return $errorResponse;
+        }
+
+        $this->assetUpdater->updateAssets($contest);
+        $this->eventLogService->log('contests', $contest->getCid(), EventLogService::ACTION_UPDATE,
+            $contest->getCid());
+
+        return new Response('', Response::HTTP_NO_CONTENT);
     }
 
     /**
      * Change the start time of the given contest
      * @Rest\Patch("/{cid}")
      * @IsGranted("ROLE_API_WRITER")
-     * @param Request $request
-     * @param string  $cid
-     * @return Response
-     * @throws \Doctrine\ORM\NonUniqueResultException
-     * @throws \Exception
-     * @SWG\Parameter(
+     * @throws NonUniqueResultException
+     * @throws Exception
+     * @OA\Parameter(
      *     name="cid",
      *     in="path",
-     *     type="string",
-     *     description="The ID of the contest to change the start time for"
-     * )
-     * @SWG\Parameter(
-     *     name="id",
-     *     in="formData",
-     *     type="string",
      *     description="The ID of the contest to change the start time for",
-     *     required=true
+     *     @OA\Schema(type="string")
      * )
-     * @SWG\Parameter(
-     *     name="start_time",
-     *     in="formData",
-     *     type="string",
-     *     format="date-time",
-     *     description="The new start time of the contest",
-     *     required=false,
-     *     allowEmptyValue=true
+     * @OA\RequestBody(
+     *     required=true,
+     *     @OA\MediaType(
+     *         mediaType="application/x-www-form-urlencoded",
+     *         @OA\Schema(
+     *             required={"id"},
+     *             @OA\Property(
+     *                 property="id",
+     *                 description="The ID of the contest to change the start time for",
+     *                 type="string"
+     *             ),
+     *             @OA\Property(
+     *                 property="start_time",
+     *                 description="The new start time of the contest",
+     *                 type="string",
+     *                 format="date-time"
+     *             )
+     *         )
+     *     )
      * )
-     * @SWG\Response(
+     * @OA\Response(
      *     response="200",
      *     description="Contest start time changed successfully",
      * )
-     * @SWG\Response(
-     *     response="400",
-     *     description="Invalid input data"
-     * )
-     * @SWG\Response(
+     * @OA\Response(
      *     response="403",
      *     description="Changing start time not allowed"
      * )
      */
-    public function changeStartTimeAction(Request $request, string $cid)
+    public function changeStartTimeAction(Request $request, string $cid) : Response
     {
         $contest  = $this->getContestWithId($request, $cid);
-        $response = null;
         $now      = Utils::now();
         $changed  = false;
         if (!$request->request->has('id')) {
@@ -239,19 +393,16 @@ class ContestController extends AbstractRestController
     /**
      * Get the contest in YAML format
      * @Rest\Get("/{cid}/contest-yaml")
-     * @SWG\Get(produces={"application/x-yaml"})
-     * @param Request $request
-     * @param string  $cid
-     * @return StreamedResponse
-     * @throws \Doctrine\ORM\NonUniqueResultException
-     * @throws \Exception
-     * @SWG\Parameter(ref="#/parameters/cid")
-     * @SWG\Response(
+     * @throws NonUniqueResultException
+     * @throws Exception
+     * @OA\Parameter(ref="#/components/parameters/cid")
+     * @OA\Response(
      *     response="200",
-     *     description="The contest in YAML format"
+     *     description="The contest in YAML format",
+     *     @OA\MediaType(mediaType="application/x-yaml")
      * )
      */
-    public function getContestYamlAction(Request $request, string $cid)
+    public function getContestYamlAction(Request $request, string $cid) : StreamedResponse
     {
         $contest      = $this->getContestWithId($request, $cid);
         $penalty_time = $this->config->get('penalty_time');
@@ -279,18 +430,15 @@ class ContestController extends AbstractRestController
     /**
      * Get the current contest state
      * @Rest\Get("/{cid}/state")
-     * @param Request $request
-     * @param string  $cid
-     * @return array|null
-     * @throws \Doctrine\ORM\NonUniqueResultException
-     * @SWG\Parameter(ref="#/parameters/cid")
-     * @SWG\Response(
+     * @throws NonUniqueResultException
+     * @OA\Parameter(ref="#/components/parameters/cid")
+     * @OA\Response(
      *     response="200",
      *     description="The contest state",
-     *     @SWG\Schema(ref="#/definitions/ContestState")
+     *     @OA\JsonContent(ref="#/components/schemas/ContestState")
      * )
      */
-    public function getContestStateAction(Request $request, string $cid)
+    public function getContestStateAction(Request $request, string $cid) : ?array
     {
         $contest         = $this->getContestWithId($request, $cid);
         $inactiveAllowed = $this->isGranted('ROLE_API_READER');
@@ -304,54 +452,50 @@ class ContestController extends AbstractRestController
     /**
      * Get the event feed for the given contest
      * @Rest\Get("/{cid}/event-feed")
-     * @SWG\Get(produces={"application/x-ndjson"})
+     * @OA\Get()
      * @Security("is_granted('ROLE_JURY') or is_granted('ROLE_API_READER')")
-     * @param Request                  $request
-     * @param string                   $cid
-     * @param MetadataFactoryInterface $metadataFactory
-     * @param KernelInterface          $kernel
      * @return Response|StreamedResponse
-     * @throws \Doctrine\ORM\NonUniqueResultException
-     * @SWG\Parameter(ref="#/parameters/cid")
-     * @SWG\Parameter(
+     * @throws NonUniqueResultException
+     * @OA\Parameter(ref="#/components/parameters/cid")
+     * @OA\Parameter(
      *     name="since_id",
      *     in="query",
-     *     type="string",
-     *     description="Only get events after this event"
+     *     description="Only get events after this event",
+     *     @OA\Schema(type="string")
      * )
-     * @SWG\Parameter(
+     * @OA\Parameter(
      *     name="types",
      *     in="query",
-     *     type="array",
      *     description="Types to filter the event feed on",
-     *     @SWG\Items(type="string", description="A single type")
+     *     @OA\Schema(type="array", @OA\Items(type="string", description="A single type"))
      * )
-     * @SWG\Parameter(
+     * @OA\Parameter(
      *     name="strict",
      *     in="query",
-     *     type="boolean",
      *     description="Whether to only include CCS compliant properties in the response",
-     *     default="false"
+     *     @OA\Schema(type="boolean", default=false)
      * )
-     * @SWG\Parameter(
+     * @OA\Parameter(
      *     name="stream",
      *     in="query",
-     *     type="boolean",
      *     description="Whether to stream the output or stop immediately",
-     *     default="true"
+     *     @OA\Schema(type="boolean", default=true)
      * )
-     * @SWG\Response(
+     * @OA\Response(
      *     response="200",
      *     description="The events",
-     *     @SWG\Schema(
-     *         type="array",
-     *         @SWG\Items(
-     *             type="object",
-     *             @SWG\Property(property="id", type="string"),
-     *             @SWG\Property(property="type", type="string"),
-     *             @SWG\Property(property="op", type="string"),
-     *             @SWG\Property(property="data", type="object"),
-     *             @SWG\Property(property="time", type="string", format="date-time"),
+     *     @OA\MediaType(
+     *         mediaType="application/x-ndjson",
+     *         @OA\Schema(
+     *             type="array",
+     *             @OA\Items(
+     *                 type="object",
+     *                 @OA\Property(property="id", type="string"),
+     *                 @OA\Property(property="type", type="string"),
+     *                 @OA\Property(property="op", type="string"),
+     *                 @OA\Property(property="data", type="object"),
+     *                 @OA\Property(property="time", type="string", format="date-time"),
+     *             )
      *         )
      *     )
      * )
@@ -369,7 +513,7 @@ class ContestController extends AbstractRestController
             $since_id = $request->query->getInt('since_id');
             $event    = $this->em->getRepository(Event::class)->findOneBy([
                 'eventid' => $since_id,
-                'cid' => $contest->getCid(),
+                'contest' => $contest,
             ]);
             if ($event === null) {
                 return new Response('Invalid parameter "since_id" requested.', Response::HTTP_BAD_REQUEST);
@@ -405,7 +549,8 @@ class ContestController extends AbstractRestController
                     $shortClass = str_replace('.php', '', $parts[count($parts) - 1]);
                     $class      = sprintf('App\\Entity\\%s', $shortClass);
                     if (class_exists($class)) {
-                        $plural = strtolower(Inflector::pluralize($shortClass));
+                        $inflector = InflectorFactory::create()->build();
+                        $plural = strtolower($inflector->pluralize($shortClass));
                         $toCheck[$plural] = $class;
                     }
                 }
@@ -428,6 +573,12 @@ class ContestController extends AbstractRestController
                         }
                     }
                 }
+
+                // Special case: do not send external ID for problems in strict mode
+                // This needs to be here since externalid is a property of the Problem
+                // entity, not the ContestProblem entity, so the above loop will not
+                // detect it.
+                $skippedProperties['problems'][] = 'externalid';
             }
 
             // Initialize all static events
@@ -444,7 +595,7 @@ class ContestController extends AbstractRestController
                     ->select('e')
                     ->andWhere('e.eventid > :lastIdSent')
                     ->setParameter('lastIdSent', $lastIdSent)
-                    ->andWhere('e.cid = :cid')
+                    ->andWhere('e.contest = :cid')
                     ->setParameter('cid', $contest->getCid())
                     ->orderBy('e.eventid', 'ASC');
 
@@ -485,12 +636,12 @@ class ContestController extends AbstractRestController
                             unset($data[$property]);
                         }
                     }
-                    $result = array(
+                    $result = [
                         'id' => (string)$event->getEventid(),
                         'type' => (string)$event->getEndpointtype(),
                         'op' => (string)$event->getAction(),
                         'data' => $data,
-                    );
+                    ];
                     if (!$strict) {
                         $result['time'] = Utils::absTime($event->getEventtime());
                     }
@@ -527,39 +678,32 @@ class ContestController extends AbstractRestController
      * Get general status information
      * @Rest\Get("/{cid}/status")
      * @IsGranted("ROLE_API_READER")
-     * @SWG\Parameter(ref="#/parameters/cid")
-     * @SWG\Response(
+     * @OA\Parameter(ref="#/components/parameters/cid")
+     * @OA\Response(
      *     response="200",
      *     description="General status information for the given contest",
-     *     @SWG\Schema(
+     *     @OA\JsonContent(
      *         type="object",
-     *         @SWG\Property(property="num_submissions", type="integer"),
-     *         @SWG\Property(property="num_queued", type="integer"),
-     *         @SWG\Property(property="num_judging", type="integer")
+     *         @OA\Property(property="num_submissions", type="integer"),
+     *         @OA\Property(property="num_queued", type="integer"),
+     *         @OA\Property(property="num_judging", type="integer")
      *     )
      * )
-     * @param Request $request
-     * @param string  $cid
-     * @return array
-     * @throws \Doctrine\ORM\NoResultException
-     * @throws \Doctrine\ORM\NonUniqueResultException
+     * @throws NoResultException
+     * @throws NonUniqueResultException
      */
-    public function getStatusAction(Request $request, string $cid)
+    public function getStatusAction(Request $request, string $cid) : array
     {
         return $this->dj->getContestStats($this->getContestWithId($request, $cid));
     }
 
-    /**
-     * @inheritdoc
-     */
     protected function getQueryBuilder(Request $request): QueryBuilder
     {
-        return $this->getContestQueryBuilder();
+        return $this->getContestQueryBuilder($request->query->getBoolean('onlyActive', false));
     }
 
     /**
-     * @inheritdoc
-     * @throws \Exception
+     * @throws Exception
      */
     protected function getIdField(): string
     {
@@ -568,10 +712,7 @@ class ContestController extends AbstractRestController
 
     /**
      * Get the contest with the given ID
-     * @param Request $request
-     * @param string  $id
-     * @return Contest
-     * @throws \Doctrine\ORM\NonUniqueResultException
+     * @throws NonUniqueResultException
      */
     protected function getContestWithId(Request $request, string $id): Contest
     {

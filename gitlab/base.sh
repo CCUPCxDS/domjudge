@@ -1,13 +1,8 @@
 #!/bin/bash
 
-set -euxo pipefail
+. gitlab/ci_settings.sh
 
-export PS4='(${BASH_SOURCE}:${LINENO}): - [$?] $ '
-
-DIR=$(pwd)
 lsb_release -a
-
-GITSHA=$(git rev-parse HEAD || true)
 
 cat > ~/.my.cnf <<EOF
 [client]
@@ -19,15 +14,22 @@ cat ~/.my.cnf
 
 # FIXME: This chicken-egg problem is annoying but let us bootstrap for now.
 echo "CREATE DATABASE IF NOT EXISTS \`domjudge\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" | mysql
-echo "GRANT SELECT, INSERT, UPDATE, DELETE ON \`domjudge\`.* TO 'domjudge'@'%' IDENTIFIED BY 'domjudge';" | mysql
+echo "CREATE USER 'domjudge'@'%' IDENTIFIED BY 'domjudge';" | mysql
+echo "GRANT SELECT, INSERT, UPDATE, DELETE ON \`domjudge\`.* TO 'domjudge'@'%';" | mysql
 
 # Increase max_allowed_packet for following connections.
 echo "SET GLOBAL max_allowed_packet = 100*1024*1024;" | mysql
 
+# Test that SQL upgrade scripts also work with this setting
+if [ -n "${MYSQL_REQUIRE_PRIMARY_KEY:-}" ]; then
+    echo 'SET GLOBAL sql_require_primary_key = 1;' | mysql
+fi
+
 # Generate a dbpasswords file
-echo "dummy:${MARIADB_PORT_3306_TCP_ADDR}:domjudge:domjudge:domjudge" > etc/dbpasswords.secret
+echo "unused:${MARIADB_PORT_3306_TCP_ADDR}:domjudge:domjudge:domjudge:3306" > etc/dbpasswords.secret
 
 # Generate APP_SECRET for symfony
+# shellcheck disable=SC2164
 ( cd etc ; ./gensymfonysecret > symfony_app.secret )
 
 cat > webapp/config/static.yaml <<EOF
@@ -44,7 +46,6 @@ parameters:
     domjudge.rundir: /output/run
     domjudge.tmpdir: /output/tmp
     domjudge.baseurl: http://localhost/domjudge
-    domjudge.submitclient_enabled: yes
 EOF
 
 # install all php dependencies
@@ -55,11 +56,12 @@ echo -e "\033[0m"
 
 # configure, make and install (but skip documentation)
 make configure
-./configure --with-baseurl='http://localhost/domjudge/' --with-domjudge-user=domjudge --with-judgehost_chrootdir=${DIR}/chroot/domjudge
-make build-scripts domserver judgehost docs
-sudo make install-domserver install-judgehost install-docs
+./configure --with-baseurl='http://localhost/domjudge/' --with-domjudge-user=domjudge --with-judgehost_chrootdir=${DIR}/chroot/domjudge |& tee "$GITLABARTIFACTS/configure.log"
+make build-scripts domserver judgehost docs |& tee "$GITLABARTIFACTS/make.log"
+sudo make install-domserver install-judgehost install-docs |& tee -a "$GITLABARTIFACTS/make.log"
 
 # setup database and add special user
+# shellcheck disable=SC2164
 cd /opt/domjudge/domserver
 setfacl -m u:www-data:r etc/restapi.secret etc/initial_admin_password.secret \
                         etc/dbpasswords.secret etc/symfony_app.secret

@@ -10,25 +10,29 @@ use App\Helpers\OrdinalArray;
 use App\Service\ConfigurationService;
 use App\Service\DOMJudgeService;
 use App\Service\EventLogService;
+use App\Service\ImportExportService;
 use App\Service\ImportProblemService;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\NonUniqueResultException;
 use Doctrine\ORM\QueryBuilder;
+use Exception;
 use FOS\RestBundle\Controller\Annotations as Rest;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\IsGranted;
-use Swagger\Annotations as SWG;
+use OpenApi\Annotations as OA;
 use Symfony\Component\HttpFoundation\File\UploadedFile;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
+use Symfony\Component\Yaml\Yaml;
 
 /**
- * @Rest\Route("/api/v4/contests/{cid}/problems", defaults={ "_format" = "json" })
- * @Rest\Prefix("/api/contests/{cid}/problems")
- * @Rest\NamePrefix("problems_")
- * @SWG\Tag(name="Problems")
- * @SWG\Parameter(ref="#/parameters/cid")
- * @SWG\Response(response="404", ref="#/definitions/NotFound")
- * @SWG\Response(response="401", ref="#/definitions/Unauthorized")
+ * @Rest\Route("/contests/{cid}/problems")
+ * @OA\Tag(name="Problems")
+ * @OA\Parameter(ref="#/components/parameters/cid")
+ * @OA\Response(response="404", ref="#/components/responses/NotFound")
+ * @OA\Response(response="401", ref="#/components/responses/Unauthorized")
+ * @OA\Response(response="400", ref="#/components/responses/InvalidResponse")
  */
 class ProblemController extends AbstractRestController implements QueryObjectTransformer
 {
@@ -37,36 +41,86 @@ class ProblemController extends AbstractRestController implements QueryObjectTra
      */
     protected $importProblemService;
 
+    /**
+     * @var ImportExportService
+     */
+    protected $importExportService;
+
     public function __construct(
         EntityManagerInterface $entityManager,
         DOMJudgeService $DOMJudgeService,
         ConfigurationService $config,
         EventLogService $eventLogService,
-        ImportProblemService $importProblemService
+        ImportProblemService $importProblemService,
+        ImportExportService $importExportService
     ) {
         parent::__construct($entityManager, $DOMJudgeService, $config, $eventLogService);
         $this->importProblemService = $importProblemService;
+        $this->importExportService = $importExportService;
+    }
+
+    /**
+     * Add one or more problems.
+     * @Rest\Post("/add-data")
+     * @IsGranted("ROLE_ADMIN")
+     * @OA\Post()
+     * @OA\RequestBody(
+     *     required=true,
+     *     @OA\MediaType(
+     *         mediaType="multipart/form-data",
+     *         @OA\Schema(
+     *             @OA\Property(
+     *                 property="data",
+     *                 type="string",
+     *                 format="binary",
+     *                 description="The problems.yaml or problems.json file to import."
+     *             )
+     *         )
+     *     )
+     * )
+     * @OA\Response(
+     *     response="200",
+     *     description="Returns the API ID's of the added problems.",
+     * )
+     * @throws BadRequestHttpException
+     */
+    public function addProblemsAction(Request $request) : array
+    {
+        // Note we use /add-data as URL here since we already have a route listening
+        // on POST /, which is to add a problem ZIP.
+
+        $contestId = $this->getContestId($request);
+        /** @var Contest $contest */
+        $contest = $this->em->getRepository(Contest::class)->find($contestId);
+
+        /** @var UploadedFile $file */
+        $file = $request->files->get('data') ?: [];
+        // Note: we read the JSON as YAML, since any JSON is also YAML and this allows us
+        // to import files with YAML inside them that match the JSON format
+        $data = Yaml::parseFile($file->getRealPath(), Yaml::PARSE_DATETIME);
+        if ($this->importExportService->importProblemsData($contest, $data, $ids)) {
+            return $ids;
+        }
+        throw new BadRequestHttpException("Error while adding problems");
     }
 
     /**
      * Get all the problems for this contest
-     * @param Request $request
-     * @return \Symfony\Component\HttpFoundation\Response
      * @Rest\Get("")
-     * @SWG\Response(
+     * @OA\Response(
      *     response="200",
      *     description="Returns all the problems for this contest",
-     *     @SWG\Schema(
+     *     @OA\JsonContent(
      *         type="array",
-     *         @SWG\Items(ref="#/definitions/ContestProblem")
+     *         @OA\Items(ref="#/components/schemas/ContestProblem")
      *     )
      * )
-     * @SWG\Parameter(ref="#/parameters/idlist")
-     * @SWG\Parameter(ref="#/parameters/strict")
-     * @throws \Doctrine\ORM\NonUniqueResultException
-     * @throws \Exception
+     * @OA\Parameter(ref="#/components/parameters/idlist")
+     * @OA\Parameter(ref="#/components/parameters/strict")
+     * @throws NonUniqueResultException
+     * @throws Exception
      */
-    public function listAction(Request $request)
+    public function listAction(Request $request): Response
     {
         // Make sure we clear the entity manager class, for when this method is called multiple times by internal requests
         $this->em->clear();
@@ -76,10 +130,6 @@ class ProblemController extends AbstractRestController implements QueryObjectTra
         $objects = $queryBuilder
             ->getQuery()
             ->getResult();
-
-        if (isset($ids) && count($objects) !== count($ids)) {
-            throw new NotFoundHttpException('One or more objects not found');
-        }
 
         if (empty($objects)) {
             return $this->renderData($request, []);
@@ -100,9 +150,11 @@ class ProblemController extends AbstractRestController implements QueryObjectTra
 
             $objects = [];
             foreach ($ordinalArray->getItems() as $item) {
-                /** @var ContestProblemWrapper $contestProblemWrapper */
-                $contestProblemWrapper = $item->getItem();
-                $contestProblem        = $contestProblemWrapper->getContestProblem();
+                /** @var ContestProblemWrapper|ContestProblem $contestProblem */
+                $contestProblem = $item->getItem();
+                if ($contestProblem instanceof ContestProblemWrapper) {
+                    $contestProblem = $contestProblem->getContestProblem();
+                }
                 $probid                = $this->getIdField() === 'p.probid' ? $contestProblem->getProbid() : $contestProblem->getExternalId();
                 if (in_array($probid, $ids)) {
                     $objects[] = $item;
@@ -118,48 +170,54 @@ class ProblemController extends AbstractRestController implements QueryObjectTra
     }
 
     /**
-     * Add one or more problems to this contest.
-     * @param Request $request
-     * @return array
+     * Add a problem to this contest.
      * @Rest\Post("")
      * @IsGranted("ROLE_ADMIN")
-     * @SWG\Post(consumes={"multipart/form-data"})
-     * @SWG\Parameter(
-     *     name="zip[]",
-     *     in="formData",
-     *     type="file",
+     * @OA\Post()
+     * @OA\RequestBody(
      *     required=true,
-     *     description="The problem archives to import"
-     * )
-     * @SWG\Parameter(
-     *     name="problem",
-     *     in="formData",
-     *     type="string",
-     *     description="Optional: problem id to update."
-     * )
-     * @SWG\Response(
-     *     response="200",
-     *     description="Returns the IDs of the imported problems and any messages produced",
-     *     @SWG\Schema(
-     *         type="object",
-     *         @SWG\Property(property="problem_ids", type="array",
-     *             @SWG\Items(type="integer", description="The IDs of the imported problems")
-     *         ),
-     *         @SWG\Property(property="messages", type="array",
-     *             @SWG\Items(type="string", description="Messages produced while adding problems")
+     *     @OA\MediaType(
+     *         mediaType="multipart/form-data",
+     *         @OA\Schema(
+     *             required={"zip"},
+     *             @OA\Property(
+     *                 property="zip",
+     *                 type="string",
+     *                 format="binary",
+     *                 description="The problem archive to import"
+     *             ),
+     *             @OA\Property(
+     *                 property="problem",
+     *                 description="Optional: problem id to update.",
+     *                 type="string"
+     *             )
      *         )
      *     )
      * )
-     * @throws \Doctrine\ORM\NonUniqueResultException
+     * @OA\Response(
+     *     response="200",
+     *     description="Returns the ID of the imported problem and any messages produced",
+     *     @OA\JsonContent(
+     *         type="object",
+     *         @OA\Property(property="problem_id", type="integer", description="The ID of the imported problem"),
+     *         @OA\Property(property="messages", type="array",
+     *             @OA\Items(type="string", description="Messages produced while adding problems")
+     *         )
+     *     )
+     * )
+     * @throws NonUniqueResultException
      */
-    public function addProblemAction(Request $request)
+    public function addProblemAction(Request $request) : array
     {
-        $files     = $request->files->get('zip') ?: [];
+        $file     = $request->files->get('zip');
+        if (empty($file)) {
+            throw new BadRequestHttpException('ZIP file missing');
+        }
+
         $contestId = $this->getContestId($request);
         /** @var Contest $contest */
         $contest     = $this->em->getRepository(Contest::class)->find($contestId);
         $allMessages = [];
-        $probIds     = [];
 
         // Only timeout after 2 minutes, since importing may take a while.
         set_time_limit(120);
@@ -167,9 +225,6 @@ class ProblemController extends AbstractRestController implements QueryObjectTra
         $probId = $request->request->get('problem');
         $problem = null;
         if (!empty($probId)) {
-            if (sizeof($files) != 1) {
-                throw new BadRequestHttpException('Can only take one problem zip if \'problem\' is set.');
-            }
             $problem = $this->em->createQueryBuilder()
                 ->from(Problem::class, 'p')
                 ->select('p')
@@ -182,57 +237,51 @@ class ProblemController extends AbstractRestController implements QueryObjectTra
             }
         }
         $errors = [];
-        /** @var UploadedFile $file */
-        foreach ($files as $file) {
-            $zip = null;
-            try {
-                $zip         = $this->dj->openZipFile($file->getRealPath());
-                $clientName  = $file->getClientOriginalName();
-                $messages    = [];
-                $newProblem  = $this->importProblemService->importZippedProblem(
-                    $zip, $clientName, $problem, $contest, $messages
-                );
-                $allMessages = array_merge($allMessages, $messages);
-                if ($newProblem) {
-                    $this->dj->auditlog('problem', $newProblem->getProbid(), 'upload zip', $clientName);
-                    $probIds[] = $newProblem->getProbid();
-                } else {
-                    $errors = array_merge($errors, $messages);
-                }
-            } catch (\Exception $e) {
-                $allMessages[] = $e->getMessage();
-            } finally {
-                if ($zip) {
-                    $zip->close();
-                }
+        $zip = null;
+        try {
+            $zip         = $this->dj->openZipFile($file->getRealPath());
+            $clientName  = $file->getClientOriginalName();
+            $messages    = [];
+            $newProblem  = $this->importProblemService->importZippedProblem(
+                $zip, $clientName, $problem, $contest, $messages
+            );
+            $allMessages = array_merge($allMessages, $messages);
+            if ($newProblem) {
+                $this->dj->auditlog('problem', $newProblem->getProbid(), 'upload zip', $clientName);
+                $probId = $newProblem->getApiId($this->eventLogService);
+            } else {
+                $errors = array_merge($errors, $messages);
+            }
+        } catch (Exception $e) {
+            $allMessages[] = $e->getMessage();
+        } finally {
+            if ($zip) {
+                $zip->close();
             }
         }
         if (!empty($errors)) {
             throw new BadRequestHttpException(json_encode($errors));
         }
         return [
-            'problem_ids' => $probIds,
+            'problem_id' => $probId,
             'messages' => $allMessages,
         ];
     }
 
     /**
      * Get the given problem for this contest
-     * @param Request $request
-     * @param string  $id
-     * @return \Symfony\Component\HttpFoundation\Response
-     * @throws \Doctrine\ORM\NonUniqueResultException
-     * @throws \Exception
+     * @throws NonUniqueResultException
+     * @throws Exception
      * @Rest\Get("/{id}")
-     * @SWG\Response(
+     * @OA\Response(
      *     response="200",
      *     description="Returns the given problem for this contest",
-     *     ref="#/definitions/ContestProblem"
+     *     @OA\JsonContent(ref="#/components/schemas/ContestProblem")
      * )
-     * @SWG\Parameter(ref="#/parameters/id")
-     * @SWG\Parameter(ref="#/parameters/strict")
+     * @OA\Parameter(ref="#/components/parameters/id")
+     * @OA\Parameter(ref="#/components/parameters/strict")
      */
-    public function singleAction(Request $request, string $id)
+    public function singleAction(Request $request, string $id) : Response
     {
         $ordinalArray = new OrdinalArray($this->listActionHelper($request));
 
@@ -257,9 +306,6 @@ class ProblemController extends AbstractRestController implements QueryObjectTra
         return $this->renderData($request, $object);
     }
 
-    /**
-     * @inheritdoc
-     */
     protected function getQueryBuilder(Request $request): QueryBuilder
     {
         $contestId = $this->getContestId($request);
@@ -286,8 +332,7 @@ class ProblemController extends AbstractRestController implements QueryObjectTra
     }
 
     /**
-     * @inheritdoc
-     * @throws \Exception
+     * @throws Exception
      */
     protected function getIdField(): string
     {

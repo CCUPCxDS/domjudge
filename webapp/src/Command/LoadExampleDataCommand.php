@@ -8,10 +8,6 @@ use Symfony\Component\Console\Input\ArrayInput;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Output\OutputInterface;
 
-/**
- * Class LoadExampleDataCommand
- * @package App\Command
- */
 class LoadExampleDataCommand extends Command
 {
     /**
@@ -21,7 +17,7 @@ class LoadExampleDataCommand extends Command
     {
         $this
             ->setName('domjudge:load-example-data')
-            ->setDescription('Load the example data');
+            ->setDescription('Load example data to get a sample DOMjudge installation up and running');
     }
 
     /**

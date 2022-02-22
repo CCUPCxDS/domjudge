@@ -4,6 +4,7 @@ namespace App\Controller\Team;
 
 use App\Controller\BaseController;
 use App\Entity\Judging;
+use App\Entity\Language;
 use App\Entity\Problem;
 use App\Entity\Submission;
 use App\Entity\Testcase;
@@ -14,6 +15,7 @@ use App\Service\SubmissionService;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\NonUniqueResultException;
 use Doctrine\ORM\Query\Expr\Join;
+use Exception;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\IsGranted;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\Security;
 use Symfony\Component\Form\FormFactoryInterface;
@@ -22,7 +24,6 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\Routing\Annotation\Route;
-use Symfony\Component\Validator\Constraints\Language;
 
 /**
  * Class SubmissionController
@@ -74,18 +75,20 @@ class SubmissionController extends BaseController
     }
 
     /**
-     * @Route("/submit", name="team_submit")
-     * @param Request $request
-     * @return Response
-     * @throws \Exception
+     * @Route("/submit/{problem}", name="team_submit")
+     * @throws Exception
      */
-    public function createAction(Request $request)
+    public function createAction(Request $request, ?Problem $problem = null): Response
     {
         $user    = $this->dj->getUser();
         $team    = $user->getTeam();
-        $contest = $this->dj->getCurrentContest($user->getTeamid());
+        $contest = $this->dj->getCurrentContest($user->getTeam()->getTeamid());
+        $data = [];
+        if ($problem !== null) {
+            $data['problem'] = $problem;
+        }
         $form    = $this->formFactory
-            ->createBuilder(SubmitProblemType::class)
+            ->createBuilder(SubmitProblemType::class, $data)
             ->setAction($this->generateUrl('team_submit'))
             ->getForm();
 
@@ -108,16 +111,14 @@ class SubmissionController extends BaseController
                 }
                 $entryPoint = $form->get('entry_point')->getData() ?: null;
                 $submission = $this->submissionService->submitSolution(
-                    $team, $problem->getProbid(), $contest, $language, $files,
+                    $team, $this->dj->getUser(), $problem->getProbid(), $contest, $language, $files, 'team page', null,
                     null, $entryPoint, null, null, $message
                 );
 
                 if ($submission) {
-                    $this->dj->auditlog('submission', $submission->getSubmitid(), 'added',
-                                        'via teampage', null, $contest->getCid());
                     $this->addFlash(
                         'success',
-                        '<strong>Submission done!</strong> Watch for the verdict in the list below.'
+                        'Submission done! Watch for the verdict in the list below.'
                     );
                 } else {
                     $this->addFlash('danger', $message);
@@ -126,7 +127,7 @@ class SubmissionController extends BaseController
             }
         }
 
-        $data = ['form' => $form->createView()];
+        $data = ['form' => $form->createView(), 'problem' => $problem];
 
         if ($request->isXmlHttpRequest()) {
             return $this->render('team/submit_modal.html.twig', $data);
@@ -137,14 +138,11 @@ class SubmissionController extends BaseController
 
     /**
      * @Route("/submission/{submitId<\d+>}", name="team_submission")
-     * @param Request $request
-     * @param int     $submitId
-     * @return Response
      * @throws NonUniqueResultException
      */
-    public function viewAction(Request $request, int $submitId)
+    public function viewAction(Request $request, int $submitId) : Response
     {
-        $verificationRequired = (bool)$this->config->get('verification_required');;
+        $verificationRequired = (bool)$this->config->get('verification_required');
         $showCompile      = $this->config->get('show_compile');
         $showTestcaseResult = $this->config->get('show_testcase_result');
         $showResultDetail = $this->config->get('show_result_detail');
@@ -160,7 +158,7 @@ class SubmissionController extends BaseController
             ->join('cp.problem', 'p')
             ->join('s.language', 'l')
             ->select('j', 's', 'cp', 'p', 'l')
-            ->andWhere('j.submitid = :submitId')
+            ->andWhere('j.submission = :submitId')
             ->andWhere('j.valid = 1')
             ->andWhere('s.team = :team')
             ->setParameter(':submitId', $submitId)
@@ -189,7 +187,7 @@ class SubmissionController extends BaseController
                 ->andWhere('t.problem = :problem')
                 ->setParameter(':judging', $judging)
                 ->setParameter(':problem', $judging->getSubmission()->getProblem())
-                ->orderBy('t.rank');
+                ->orderBy('t.ranknumber');
 
             if ($showTestcaseResult == 1) {
                 $queryBuilder->andWhere('t.sample = 1');
@@ -237,12 +235,9 @@ class SubmissionController extends BaseController
 
     /**
      * @Route("/submission/{submitId<\d+>}/download", name="team_submission_download")
-     * @param int $submitId
-     *
-     * @return Response
      * @throws NonUniqueResultException
      */
-    public function downloadAction($submitId)
+    public function downloadAction(int $submitId) : Response
     {
         $allowDownload = (bool)$this->config->get('allow_team_submission_download');
         if (!$allowDownload) {

@@ -48,14 +48,6 @@ class ConfigController extends AbstractController
      */
     protected $config;
 
-    /**
-     * TeamCategoryController constructor.
-     * @param EntityManagerInterface $em
-     * @param LoggerInterface        $logger
-     * @param DOMJudgeService        $dj
-     * @param CheckConfigService     $checkConfigService
-     * @param ConfigurationService $config
-     */
     public function __construct(
         EntityManagerInterface $em,
         LoggerInterface $logger,
@@ -72,8 +64,6 @@ class ConfigController extends AbstractController
 
     /**
      * @Route("", name="jury_config")
-     * @param EventLogService $eventLogService
-     * @param Request $request
      * @return RedirectResponse|Response
      * @throws Exception
      */
@@ -86,7 +76,7 @@ class ConfigController extends AbstractController
         unset($spec);
         /** @var Configuration[] $options */
         $options = $this->em->createQueryBuilder()
-            ->from(Configuration::class, 'c',  'c.name')
+            ->from(Configuration::class, 'c', 'c.name')
             ->select('c')
             ->getQuery()
             ->getResult();
@@ -114,7 +104,7 @@ class ConfigController extends AbstractController
             return $this->redirectToRoute('jury_config');
         }
 
-        $categories = array();
+        $categories = [];
         foreach ($specs as $spec) {
             if (!in_array($spec['category'], $categories)) {
                 $categories[] = $spec['category'];
@@ -152,23 +142,26 @@ class ConfigController extends AbstractController
     /**
      * @Route("/check", name="jury_config_check")
      */
-    public function checkAction(Request $request)
+    public function checkAction(Request $request, string $projectDir, string $logsDir): Response
     {
         $results = $this->checkConfigService->runAll();
         return $this->render('jury/config_check.html.twig', [
-            'results' => $results
+            'results' => $results,
+            'dir' => [
+                    'project' => dirname($projectDir),
+                    'log' => $logsDir,
+                ],
         ]);
     }
 
     /**
      * @Route("/check/phpinfo", name="jury_config_phpinfo")
      */
-    public function phpinfoAction(Request $request)
+    public function phpinfoAction(Request $request): Response
     {
         ob_start();
         phpinfo();
-        $phpinfo = ob_get_contents();
-        ob_end_clean();
+        $phpinfo = ob_get_clean();
 
         return new Response($phpinfo);
     }

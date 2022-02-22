@@ -4,7 +4,7 @@
  * @configure_input@
  *
  * Import contest data from an event feed following the Contest API specification.
- * See https://clics.ecs.baylor.edu/index.php?title=Contest_API
+ * See https://ccs-specs.icpc.io/2021-11/contest_api
  *
  * The following assumptions and caveats are of note:
  * - The contest that will be imported to should already contain the problems,
@@ -25,7 +25,7 @@
 use App\Kernel;
 use Symfony\Bundle\FrameworkBundle\Console\Application;
 use Symfony\Component\Console\Input\ArgvInput;
-use Symfony\Component\Debug\Debug;
+use Symfony\Component\ErrorHandler\Debug;
 
 if (false === in_array(\PHP_SAPI, ['cli', 'phpdbg', 'embed'], true)) {
     echo 'Warning: The console should be invoked via the CLI version of PHP, not the '.\PHP_SAPI.' SAPI'.\PHP_EOL;

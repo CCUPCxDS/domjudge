@@ -19,8 +19,24 @@
 {% endmacro %}
 
 
-{% macro jscolor_extrahead() %}
-    <script src="{{ asset('js/jscolor.js') }}"></script>
+{% macro coloris_extrahead() %}
+    <link rel="stylesheet" href="{{ asset('css/coloris.min.css') }}">
+    <script src="{{ asset('js/coloris.min.js') }}"></script>
+
+    <script>
+        function bindColor() {
+            Coloris({
+                el: '[data-color-picker]',
+                clearButton: {
+                    show: true
+                }
+            });
+        }
+
+        $(function() {
+            bindColor();
+        });
+    </script>
 {% endmacro %}
 
 {% macro table_extrahead() %}
@@ -74,7 +90,7 @@
                     <th scope="col" class="
                         {%- if column.sort is defined and column.sort %}sortable{%- endif %}
                         {%- if (column.search is not defined) or column.search %} searchable{%- endif %}">
-                        {{- column.title | raw -}}
+                        {{- column.title|nl2br -}}
                     </th>
                 {%- endfor %}
                 {%- if num_actions > 0 %}
@@ -101,9 +117,13 @@
                             {%- if item.link is defined %}<a href="{{ item.link }}">
                                 {%- elseif row.link is defined %}<a href="{{ row.link }}">{% endif %}
                                     {% if key == "status" %}
-                                    {{- (item.value|default(item.default|default('')))|statusIcon()|raw -}}
+                                    {{- (item.value|default(item.default|default('')))|statusIcon -}}
+                                    {% elseif key == "country" %}
+                                    {{- (item.value|default(item.default|default('')))|countryFlag -}}
+                                    {% elseif key == "affiliation_logo" %}
+                                    {{- (item.value|default(item.default|default('')))|affiliationLogo(item.title) -}}
                                     {% else %}
-                                    {{- (item.value|default(item.default|default('')))|raw -}}
+                                    {{- (item.value|default(item.default|default(''))) -}}
                                     {% endif %}
                                     {%- if item.link is defined or row.link is defined -%}</a>{% endif %}
                         </td>
@@ -113,7 +133,7 @@
                         <td>
                             {%- if action %}
 
-                                <a href="{{ action.link }}" title="{{ action.title }}" {% if action.ajaxModal is defined and action.ajaxModal %}data-ajax-modal{% endif %}>
+                                <a {% if action.disabled is defined and action.disabled %}class="disabled"{% endif %} {% if action.link is defined %}href="{{ action.link }}"{% endif %} title="{{ action.title }}" {% if action.ajaxModal is defined and action.ajaxModal %}data-ajax-modal{% endif %}>
                                     <i class="fas fa-{{ action.icon }}"></i>
                                 </a>
                             {%- endif %}

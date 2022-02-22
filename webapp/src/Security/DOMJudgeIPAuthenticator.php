@@ -81,6 +81,7 @@ class DOMJudgeIPAuthenticator extends AbstractGuardAuthenticator
         // If it's stateless, we provide auth support every time
         $stateless_fw_contexts = [
             'security.firewall.map.context.api',
+            'security.firewall.map.context.metrics',
         ];
         $fwcontext             = $request->attributes->get('_firewall_context', '');
         $ipAutologin           = $this->config->get('ip_autologin');
@@ -174,7 +175,6 @@ class DOMJudgeIPAuthenticator extends AbstractGuardAuthenticator
         if ($request->attributes->get('_route') === 'login'
             && $request->isMethod('POST')
             && $request->request->get('loginmethod') === 'ipaddress') {
-
             // Use target URL from session if set
             if ($providerKey !== null &&
                 $targetUrl = $this->getTargetPath($request->getSession(), $providerKey)) {

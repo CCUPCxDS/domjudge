@@ -2,7 +2,7 @@
 # https://symfony.com/doc/current/security.html
 security:
     role_hierarchy:
-        ROLE_JURY: [ROLE_API, ROLE_API_READER, ROLE_API_SOURCE_READER]
+        ROLE_JURY: [ROLE_CLARIFICATION_RW, ROLE_API, ROLE_API_READER, ROLE_API_SOURCE_READER]
         ROLE_ADMIN: [ROLE_JURY, ROLE_JUDGEHOST, ROLE_API_WRITER]
         ROLE_SUPER_ADMIN: [ROLE_ADMIN, ROLE_ALLOWED_TO_SWITCH]
 
@@ -36,6 +36,19 @@ security:
             stateless: true
             user_checker: App\Security\UserChecker
             anonymous: ~
+            guard:
+                # SEE NOTE ABOVE IF CHANGING ANYTHING HERE
+                authenticators:
+                    - App\Security\DOMJudgeIPAuthenticator
+                    - App\Security\DOMJudgeBasicAuthenticator
+                entry_point: App\Security\DOMJudgeIPAuthenticator
+
+        # Provides prometheus metrics
+        metrics:
+            pattern: ^/prometheus/metrics
+            provider: domjudge_db_provider
+            stateless: true
+            user_checker: App\Security\UserChecker
             guard:
                 # SEE NOTE ABOVE IF CHANGING ANYTHING HERE
                 authenticators:

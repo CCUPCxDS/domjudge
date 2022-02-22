@@ -8,6 +8,7 @@ use App\Service\ConfigurationService;
 use App\Service\DOMJudgeService;
 use App\Service\ScoreboardService;
 use Doctrine\ORM\EntityManagerInterface;
+use Exception;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\IsGranted;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\Security;
 use Symfony\Component\HttpFoundation\Request;
@@ -47,11 +48,6 @@ class ScoreboardController extends BaseController
 
     /**
      * ScoreboardController constructor.
-     *
-     * @param DOMJudgeService        $dj
-     * @param ConfigurationService   $config
-     * @param ScoreboardService      $scoreboardService
-     * @param EntityManagerInterface $em
      */
     public function __construct(
         DOMJudgeService $dj,
@@ -67,20 +63,18 @@ class ScoreboardController extends BaseController
 
     /**
      * @Route("/scoreboard", name="team_scoreboard")
-     * @param Request $request
-     * @return Response
-     * @throws \Exception
+     * @throws Exception
      */
-    public function scoreboardAction(Request $request)
+    public function scoreboardAction(Request $request) : Response
     {
         $user       = $this->dj->getUser();
         $response   = new Response();
-        $contest    = $this->dj->getCurrentContest($user->getTeamid());
+        $contest    = $this->dj->getCurrentContest($user->getTeam()->getTeamid());
         $refreshUrl = $this->generateUrl('team_scoreboard');
         $data       = $this->scoreboardService->getScoreboardTwigData(
             $request, $response, $refreshUrl, false, false, false, $contest
         );
-        $data['myTeamId'] = $user->getTeamid();
+        $data['myTeamId'] = $user->getTeam()->getTeamid();
 
         if ($request->isXmlHttpRequest()) {
             $data['current_contest'] = $contest;
@@ -91,12 +85,9 @@ class ScoreboardController extends BaseController
 
     /**
      * @Route("/team/{teamId<\d+>}", name="team_team")
-     * @param Request $request
-     * @param int     $teamId
-     * @return Response
-     * @throws \Exception
+     * @throws Exception
      */
-    public function teamAction(Request $request, int $teamId)
+    public function teamAction(Request $request, int $teamId) : Response
     {
         $team             = $this->em->getRepository(Team::class)->find($teamId);
         $showFlags        = (bool)$this->config->get('show_flags');
@@ -109,8 +100,8 @@ class ScoreboardController extends BaseController
 
         if ($request->isXmlHttpRequest()) {
             return $this->render('team/team_modal.html.twig', $data);
-        } else {
-            return $this->render('team/team.html.twig', $data);
         }
+
+        return $this->render('team/team.html.twig', $data);
     }
 }

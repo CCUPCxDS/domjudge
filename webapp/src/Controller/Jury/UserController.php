@@ -4,6 +4,7 @@ namespace App\Controller\Jury;
 
 use App\Controller\BaseController;
 use App\Entity\Role;
+use App\Entity\Submission;
 use App\Entity\Team;
 use App\Entity\User;
 use App\Form\Type\GeneratePasswordsType;
@@ -11,10 +12,14 @@ use App\Form\Type\UserType;
 use App\Service\ConfigurationService;
 use App\Service\DOMJudgeService;
 use App\Service\EventLogService;
+use App\Service\SubmissionService;
 use App\Utils\Utils;
 use Doctrine\ORM\EntityManagerInterface;
+use Exception;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\IsGranted;
+use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpFoundation\ResponseHeaderBag;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\HttpKernel\KernelInterface;
@@ -60,15 +65,10 @@ class UserController extends BaseController
     protected $tokenStorage;
 
     /**
-     * UserController constructor.
-     *
-     * @param EntityManagerInterface $em
-     * @param DOMJudgeService        $dj
-     * @param ConfigurationService   $config
-     * @param KernelInterface        $kernel
-     * @param EventLogService        $eventLogService
-     * @param TokenStorageInterface  $tokenStorage
+     * @var int
      */
+    protected $minPasswordLength = 10;
+
     public function __construct(
         EntityManagerInterface $em,
         DOMJudgeService $dj,
@@ -87,10 +87,9 @@ class UserController extends BaseController
 
     /**
      * @Route("", name="jury_users")
-     * @return \Symfony\Component\HttpFoundation\Response
-     * @throws \Exception
+     * @throws Exception
      */
-    public function indexAction()
+    public function indexAction() : Response
     {
         /** @var User[] $users */
         $users = $this->em->createQueryBuilder()
@@ -132,10 +131,10 @@ class UserController extends BaseController
 
             if ($u->getTeam()) {
                 $userdata['team'] = [
-                    'value' => $u->getTeamid(),
-                    'sortvalue' => $u->getTeamid(),
+                    'value' => 't' . $u->getTeam()->getTeamid() . ' (' . $u->getTeamName() . ')',
+                    'sortvalue' => $u->getTeam()->getTeamid(),
                     'link' => $this->generateUrl('jury_team', [
-                        'teamId' => $u->getTeamid(),
+                        'teamId' => $u->getTeam()->getTeamid(),
                     ]),
                     'title' => $u->getTeam()->getEffectiveName(),
                 ];
@@ -192,11 +191,9 @@ class UserController extends BaseController
 
     /**
      * @Route("/{userId<\d+>}", name="jury_user")
-     * @param Request $request
-     * @param int     $userId
-     * @return \Symfony\Component\HttpFoundation\RedirectResponse|\Symfony\Component\HttpFoundation\Response
+     * @return RedirectResponse|Response
      */
-    public function viewAction(Request $request, int $userId)
+    public function viewAction(Request $request, int $userId, SubmissionService $submissionService)
     {
         /** @var User $user */
         $user = $this->em->getRepository(User::class)->find($userId);
@@ -204,16 +201,44 @@ class UserController extends BaseController
             throw new NotFoundHttpException(sprintf('User with ID %s not found', $userId));
         }
 
-        return $this->render('jury/user.html.twig', ['user' => $user]);
+        $restrictions = ['userid' => $user->getUserid()];
+        /** @var Submission[] $submissions */
+        [$submissions, $submissionCounts] = $submissionService->getSubmissionList(
+            $this->dj->getCurrentContests(),
+            $restrictions
+        );
+
+        return $this->render('jury/user.html.twig', [
+            'user' => $user,
+            'submissions' => $submissions,
+            'submissionCounts' => $submissionCounts,
+            'showContest' => count($this->dj->getCurrentContests()) > 1,
+            'showExternalResult' => $this->config->get('data_source') ===
+                DOMJudgeService::DATA_SOURCE_CONFIGURATION_AND_LIVE_EXTERNAL,
+            'refresh' => [
+                'after' => 3,
+                'url' => $this->generateUrl('jury_user', ['userId' => $user->getUserid()]),
+                'ajax' => true,
+            ],
+        ]);
+    }
+
+    public function checkPasswordLength(User $user, $form) {
+        if ($user->getPlainPassword() && strlen($user->getPlainPassword())<$this->minPasswordLength) {
+            $this->addFlash('danger', "Password should be " . $this->minPasswordLength . "+ chars.");
+            return $this->render('jury/user_edit.html.twig', [
+                'user' => $user,
+                'form' => $form->createView(),
+                'min_password_length' => $this->minPasswordLength,
+            ]);
+        }
     }
 
     /**
      * @Route("/{userId<\d+>}/edit", name="jury_user_edit")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @param int     $userId
-     * @return \Symfony\Component\HttpFoundation\RedirectResponse|\Symfony\Component\HttpFoundation\Response
-     * @throws \Exception
+     * @return RedirectResponse|Response
+     * @throws Exception
      */
     public function editAction(Request $request, int $userId)
     {
@@ -228,6 +253,9 @@ class UserController extends BaseController
         $form->handleRequest($request);
 
         if ($form->isSubmitted() && $form->isValid()) {
+            if ($errorResult = $this->checkPasswordLength($user, $form)) {
+                return $errorResult;
+            }
             $this->saveEntity($this->em, $this->eventLogService, $this->dj, $user,
                               $user->getUserid(),
                               false);
@@ -251,18 +279,17 @@ class UserController extends BaseController
         }
 
         return $this->render('jury/user_edit.html.twig', [
-            'user' => $user,
-            'form' => $form->createView(),
+            'user'                => $user,
+            'form'                => $form->createView(),
+            'min_password_length' => $this->minPasswordLength,
         ]);
     }
 
     /**
      * @Route("/{userId<\d+>}/delete", name="jury_user_delete")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @param int     $userId
-     * @return \Symfony\Component\HttpFoundation\RedirectResponse|\Symfony\Component\HttpFoundation\Response
-     * @throws \Exception
+     * @return RedirectResponse|Response
+     * @throws Exception
      */
     public function deleteAction(Request $request, int $userId)
     {
@@ -272,18 +299,16 @@ class UserController extends BaseController
             throw new NotFoundHttpException(sprintf('User with ID %s not found', $userId));
         }
 
-        return $this->deleteEntity($request, $this->em, $this->dj, $this->eventLogService, $this->kernel,
-                                   $user, $user->getName(), $this->generateUrl('jury_users'));
+        return $this->deleteEntities($request, $this->em, $this->dj, $this->eventLogService, $this->kernel,
+                                     [$user], $this->generateUrl('jury_users'));
     }
 
     /**
      * @Route("/add", name="jury_user_add")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @return \Symfony\Component\HttpFoundation\Response
-     * @throws \Exception
+     * @throws Exception
      */
-    public function addAction(Request $request)
+    public function addAction(Request $request) : Response
     {
         $user = new User();
         if ($request->query->has('team')) {
@@ -295,10 +320,11 @@ class UserController extends BaseController
         $form->handleRequest($request);
 
         if ($form->isSubmitted() && $form->isValid()) {
+            if ($errorResult = $this->checkPasswordLength($user, $form)) {
+                return $errorResult;
+            }
             $this->em->persist($user);
-            $this->saveEntity($this->em, $this->eventLogService, $this->dj, $user,
-                              $user->getUserid(),
-                              true);
+            $this->saveEntity($this->em, $this->eventLogService, $this->dj, $user, null, true);
             return $this->redirect($this->generateUrl(
                 'jury_user',
                 ['userId' => $user->getUserid()]
@@ -308,16 +334,15 @@ class UserController extends BaseController
         return $this->render('jury/user_add.html.twig', [
             'user' => $user,
             'form' => $form->createView(),
+            'min_password_length' => $this->minPasswordLength,
         ]);
     }
 
     /**
      * @Route("/generate-passwords", name="jury_generate_passwords")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @return \Symfony\Component\HttpFoundation\Response
      */
-    public function generatePasswordsAction(Request $request)
+    public function generatePasswordsAction(Request $request) : Response
     {
         $form = $this->createForm(GeneratePasswordsType::class);
         $form->handleRequest($request);
@@ -335,23 +360,23 @@ class UserController extends BaseController
                  $isjury = in_array('jury', $roles);
                  $isadmin = in_array('admin', $roles);
 
-                 if ( in_array('team', $groups) || in_array('team_nopass', $groups) ) {
-                     if ( $user->getTeamid() && ! $isjury && ! $isadmin ) {
-                         if ( in_array('team', $groups) || empty($user->getPassword()) ) {
+                 if (in_array('team', $groups) || in_array('team_nopass', $groups)) {
+                     if ($user->getTeam() && ! $isjury && ! $isadmin) {
+                         if (in_array('team', $groups) || empty($user->getPassword())) {
                              $doit = true;
                              $role = 'team';
                          }
                      }
                  }
 
-                 if ( (in_array('judge', $groups) && $isjury) ||
+                 if ((in_array('judge', $groups) && $isjury) ||
                     (in_array('admin', $groups) && $isadmin))
                  {
                      $doit = true;
                      $role = in_array('admin', $groups) ? 'admin' : 'judge';
                  }
 
-                if ( $doit ) {
+                if ($doit) {
                     $newpass = Utils::generatePassword(false);
                     $user->setPlainPassword($newpass);
                     $this->dj->auditlog('user', $user->getUserid(), 'set password');

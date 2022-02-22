@@ -23,6 +23,7 @@ use App\Service\ScoreboardService;
 use App\Service\SubmissionService;
 use App\Utils\Utils;
 use DateTime;
+use Doctrine\DBAL\DBALException;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Id\AssignedGenerator;
 use Doctrine\ORM\Mapping\ClassMetadata;
@@ -108,6 +109,9 @@ class ImportEventFeedCommand extends Command
 
     /** @var string */
     protected $configKey;
+
+    /** @var int|string */
+    protected $contestIdFromConfig;
 
     /** @var int */
     protected $contestId;
@@ -214,7 +218,7 @@ class ImportEventFeedCommand extends Command
                              'the Contest API specification')
             ->setHelp(
                 'Import contest data from an event feed following the Contest API specification:' . PHP_EOL .
-                'https://clics.ecs.baylor.edu/index.php?title=Contest_API' . PHP_EOL . PHP_EOL .
+                'https://ccs-specs.icpc.io/2021-11/contest_api' . PHP_EOL . PHP_EOL .
                 'Note the following assumptions and caveats:' . PHP_EOL .
                 '- The contest to import into should already contain the problems,' . PHP_EOL .
                 '  because the event feed does not contain the testcases.' . PHP_EOL .
@@ -236,6 +240,12 @@ class ImportEventFeedCommand extends Command
                 InputOption::VALUE_NONE,
                 'Restart importing events from the beginning. ' .
                 'If this option is not given, importing will resume where it left off.'
+            )
+            ->addOption(
+                'skip-event-id',
+                'k',
+                InputOption::VALUE_REQUIRED | InputOption::VALUE_IS_ARRAY,
+                "ID('s) of events to skip."
             );
     }
 
@@ -288,19 +298,24 @@ class ImportEventFeedCommand extends Command
             }
         }
 
-        $contest        = $this->em->getRepository(Contest::class)->find($this->contestId);
+        $contestRepository = $this->em->getRepository(Contest::class);
+        /** @var Contest $contest */
+        $contest           = $contestRepository->findOneBy(['externalid' => $this->contestIdFromConfig]) ??
+            $contestRepository->find($this->contestIdFromConfig);
         if (!$contest) {
             $this->logger->error(
                 'Contest with ID %s not found, exiting.',
-                [ $this->contestId ]
+                [ $this->contestIdFromConfig ]
             );
             return static::STATUS_ERROR;
         } else {
             $this->logger->notice(
-                'Starting event feed import into contest with ID %d [DOMjudge/%s]',
-                [ $contest->getCid(), $this->domjudgeVersion ]
+                'Starting event feed import into contest with ID %d (external ID %s) [DOMjudge/%s]',
+                [ $contest->getCid(), $contest->getExternalid() ,$this->domjudgeVersion ]
             );
         }
+
+        $this->contestId = $contest->getCid();
 
         // For teams and team categories we want to overwrite the ID so change the ID generator
         $metadata = $this->em->getClassMetaData(TeamCategory::class);
@@ -334,11 +349,11 @@ class ImportEventFeedCommand extends Command
         $this->verdicts = include $verdictsConfig;
 
         if ($this->client === null) {
-            if (!$this->importFromFile($input->getOption('from-start'))) {
+            if (!$this->importFromFile($input->getOption('from-start'), $input->getOption('skip-event-id'))) {
                 return static::STATUS_ERROR;
             }
         } else {
-            if (!$this->importFromUrl($input->getOption('from-start'))) {
+            if (!$this->importFromUrl($input->getOption('from-start'), $input->getOption('skip-event-id'))) {
                 return static::STATUS_ERROR;
             }
         }
@@ -408,12 +423,12 @@ class ImportEventFeedCommand extends Command
         // Config key exists, check if we have the required fields
         $config = $contents[$key];
 
-        if (!is_numeric($config['id'] ?? null)) {
+        if (!isset($config['id'])) {
             $this->logger->error('Config does not contain id');
             return false;
         }
 
-        $this->contestId = $config['id'];
+        $this->contestIdFromConfig = $config['id'];
 
         if (!is_string($config['feed-url'] ?? null) && !is_string($config['feed-file'] ?? null)) {
             $this->logger->error("Config does not contain 'feed-url' or 'feed-file'");
@@ -460,7 +475,7 @@ class ImportEventFeedCommand extends Command
             }
 
             if (!is_string($config['base-path'] ?? null)) {
-                $this->logger->error("Config options 'base-path' is requird when 'feed-file' is set");
+                $this->logger->error("Config options 'base-path' is required when 'feed-file' is set");
                 return false;
             }
 
@@ -482,12 +497,13 @@ class ImportEventFeedCommand extends Command
     /**
      * Import events from the given local file
      *
-     * @param bool $fromStart
+     * @param bool     $fromStart
+     * @param string[] $eventsToSkip
      *
      * @return bool False if the import should stop, true otherwise.
      * @throws Exception
      */
-    protected function importFromFile(bool $fromStart)
+    protected function importFromFile(bool $fromStart, array $eventsToSkip)
     {
         $this->logger->info('Importing from local file %s', [ $this->feedFile ]);
 
@@ -495,13 +511,13 @@ class ImportEventFeedCommand extends Command
         // the ID of the external contest.
         $file = fopen($this->feedFile, 'r');
         $contestData = null;
-        $this->readEventsfromFile($file,
+        $this->readEventsFromFile($file,
             function(array $event, string $line, &$shouldStop) use ($file, &$contestData) {
-            if ($event['type'] === 'contests') {
-                $contestData = $event['data'];
-                $shouldStop = true;
-            }
-        });
+                if ($event['type'] === 'contests') {
+                    $contestData = $event['data'];
+                    $shouldStop = true;
+                }
+            });
 
         if (!$this->compareContestId($contestData)) {
             fclose($file);
@@ -523,20 +539,20 @@ class ImportEventFeedCommand extends Command
         // If we have a 'since event ID', ignore everything up to and including it
         $sinceEventIdFound = $this->sinceEventId === null;
 
-        $this->readEventsfromFile($file,
-            function(array $event, string $line, &$shouldStop) use ($cacheFile, $file, &$sinceEventIdFound) {
-            if ($sinceEventIdFound) {
-                $this->importEvent($event);
-                $this->lastEventId = $event['id'];
-                fwrite($cacheFile, $line . "\n");
-            } elseif ($event['id'] === $this->sinceEventId) {
-                $sinceEventIdFound = true;
-            }
+        $this->readEventsFromFile($file,
+            function(array $event, string $line, &$shouldStop) use ($eventsToSkip, $cacheFile, $file, &$sinceEventIdFound) {
+                if ($sinceEventIdFound) {
+                    $this->importEvent($event, $eventsToSkip);
+                    $this->lastEventId = $event['id'];
+                    fwrite($cacheFile, $line . "\n");
+                } elseif ($event['id'] === $this->sinceEventId) {
+                    $sinceEventIdFound = true;
+                }
 
-            if ($this->shouldStop) {
-                $shouldStop = true;
-            }
-        });
+                if ($this->shouldStop) {
+                    $shouldStop = true;
+                }
+            });
 
         fclose($file);
         fclose($cacheFile);
@@ -547,12 +563,13 @@ class ImportEventFeedCommand extends Command
     /**
      * Import events from the given URL
      *
-     * @param bool $fromStart
+     * @param bool     $fromStart
+     * @param string[] $eventsToSkip
      *
      * @return bool False if the import should stop, true otherwise.
      * @throws TransportExceptionInterface
      */
-    protected function importFromUrl(bool $fromStart)
+    protected function importFromUrl(bool $fromStart, array $eventsToSkip)
     {
         $this->logger->info(
             'Importing from URL %s. Press ^C to quit (might take a bit to be detected).',
@@ -605,14 +622,14 @@ class ImportEventFeedCommand extends Command
 
             $buffer = '';
 
-            $processBuffer = function() use ($cacheFile, &$buffer) {
+            $processBuffer = function() use ($eventsToSkip, $cacheFile, &$buffer) {
                 while (($newlinePos = strpos($buffer, "\n")) !== false) {
                     $line   = substr($buffer, 0, $newlinePos);
                     $buffer = substr($buffer, $newlinePos + 1);
 
                     if (!empty($line)) {
                         $event = $this->dj->jsonDecode($line);
-                        $this->importEvent($event);
+                        $this->importEvent($event, $eventsToSkip);
 
                         $this->lastEventId = $event['id'];
                         fwrite($cacheFile, $line . "\n");
@@ -636,10 +653,12 @@ class ImportEventFeedCommand extends Command
                 // A timeout of 0.0 means we get chunks immediately and the user
                 // can cancel at any time.
                 try {
+                    $receivedData = false;
                     foreach ($this->client->stream($response, 0.0) as $chunk) {
                         // We first need to check for timeouts, as we can not call
                         // ->isLast() or ->getContent() on them
                         if (!$chunk->isTimeout()) {
+                            $receivedData = true;
                             if ($chunk->isLast()) {
                                 // Last chunk received, exit out of the inner while(true)
                                 break 2;
@@ -651,6 +670,10 @@ class ImportEventFeedCommand extends Command
                             fclose($cacheFile);
                             return true;
                         }
+                    }
+                    if (!$receivedData) {
+                        $hundred_ms = 100*1000*1000;
+                        time_nanosleep(0, $hundred_ms);
                     }
                 } catch (TransportException $e) {
                     $this->logger->error(
@@ -673,9 +696,6 @@ class ImportEventFeedCommand extends Command
             );
             sleep(5);
         }
-
-        fclose($cacheFile);
-        return true;
     }
 
     /**
@@ -693,13 +713,13 @@ class ImportEventFeedCommand extends Command
 
         $cacheFile = fopen($cacheFilePath, 'r');
 
-        $this->readEventsfromFile($cacheFile, function(array $event) {
+        $this->readEventsFromFile($cacheFile, function(array $event) {
             $this->sinceEventId = $event['id'];
         });
 
         fclose($cacheFile);
 
-        $this->logger->info('Starting event import after event with ID %d', [ $this->sinceEventId ]);
+        $this->logger->info('Starting event import after event with ID %s', [ $this->sinceEventId ]);
     }
 
     /**
@@ -714,7 +734,7 @@ class ImportEventFeedCommand extends Command
      * @param resource $filePointer
      * @param callable $callback
      */
-    protected function readEventsfromFile($filePointer, callable $callback)
+    protected function readEventsFromFile($filePointer, callable $callback)
     {
         $buffer = '';
         while (!feof($filePointer) || !empty($buffer)) {
@@ -772,10 +792,11 @@ class ImportEventFeedCommand extends Command
 
     /**
      * Import the given event
-     * @param array $event
+     * @param array    $event
+     * @param string[] $eventsToSkip
      * @throws Exception
      */
-    protected function importEvent(array $event)
+    protected function importEvent(array $event, array $eventsToSkip)
     {
         // Check whether we have received an exit signal
         if (function_exists('pcntl_signal_dispatch')) {
@@ -783,6 +804,12 @@ class ImportEventFeedCommand extends Command
         }
         if ($this->shouldStop) {
             $this->logger->notice('Received signal, exiting.');
+            return;
+        }
+
+        if (in_array($event['id'], $eventsToSkip)) {
+            $this->logger->info("Skipping event with ID %s and type %s as requested",
+                [ $event['id'], $event['type'] ]);
             return;
         }
 
@@ -913,13 +940,13 @@ class ImportEventFeedCommand extends Command
                 ->setEndtimeString($fullDuration)
                 ->setFreezetimeString($fullFreeze)
                 ->updateTimes();
-
         } else {
             // Now set the data
             $contest
-                ->setName($event['data']['name'])
                 ->setStarttimeEnabled(false);
         }
+
+        $contest->setName($event['data']['name']);
 
         // Also update the penalty time
         $penaltyTime = (int)$event['data']['penalty_time'];
@@ -1037,6 +1064,8 @@ class ImportEventFeedCommand extends Command
             );
             return;
         }
+
+        $groupId = (int)$groupId;
 
         if ($event['op'] === EventLogService::ACTION_DELETE) {
             // We need to delete the category
@@ -1174,6 +1203,7 @@ class ImportEventFeedCommand extends Command
         if ($contestProblem) {
             $action = EventLogService::ACTION_UPDATE;
         } else {
+            $this->logger->warning("No contest problem found in DOMjudge yet, creating one");
             $contestProblem = new ContestProblem();
             $contestProblem
                 ->setProblem($problem)
@@ -1182,11 +1212,37 @@ class ImportEventFeedCommand extends Command
             $problem->addContestProblem($contestProblem);
         }
 
-        $problem->setName($event['data']['name']);
+        if ($problem->getName() !== $event['data']['name']) {
+            $this->logger->warning(
+                'Problem name from DOMjudge (%s) does not match feed (%s)',
+                [ $problem->getName(), $event['data']['name'] ]
+            );
+            $problem->setName($event['data']['name']);
+        }
 
-        $contestProblem
-            ->setShortname($event['data']['label'])
-            ->setColor($event['data']['rgb'] ?? null);
+        if (isset($event['data']['time_limit']) && abs($problem->getTimelimit() - $event['data']['time_limit']) > 0.001) {
+            $this->logger->warning(
+                'Time limit from DOMjudge (%.3f) does not match feed (%.3f)',
+                [ $problem->getTimelimit(), $event['data']['time_limit'] ]
+            );
+            $problem->setTimelimit($event['data']['time_limit']);
+        }
+
+        if ($contestProblem->getShortname() !== $event['data']['label']) {
+            $this->logger->warning(
+                'Contest problem shortname from DOMjudge (%s) does not match feed (%s)',
+                [ $contestProblem->getShortname(), $event['data']['label'] ]
+            );
+            $contestProblem->setShortname($event['data']['label']);
+        }
+
+        if ($contestProblem->getColor() !== ($event['data']['rgb'] ?? null)) {
+            $this->logger->warning(
+                'Contest problem color from DOMjudge (%s) does not match feed (%s)',
+                [ $contestProblem->getColor(), $event['data']['rgb'] ]
+            );
+            $contestProblem->setColor($event['data']['rgb'] ?? null);
+        }
 
         // Save data and emit event
         if ($action === EventLogService::ACTION_CREATE) {
@@ -1209,6 +1265,16 @@ class ImportEventFeedCommand extends Command
 
         $teamId = $event['data']['id'];
         $icpcId = $event['data']['icpc_id'];
+
+        if (!is_numeric($teamId)) {
+            $this->logger->error(
+                'Cannot import team %s: only integer ID\'s are supported',
+                [ $teamId ]
+            );
+            return;
+        }
+
+        $teamId = (int)$teamId;
 
         if ($event['op'] === EventLogService::ACTION_DELETE) {
             // We need to delete the team
@@ -1251,7 +1317,7 @@ class ImportEventFeedCommand extends Command
             $groupId = reset($groupIds);
             if (!is_numeric($groupId)) {
                 $this->logger->error(
-                    'Cannot import group %s: only integer ID\'s are supported',
+                    'Cannot import team with group ID %s: only integer ID\'s are supported',
                     [ $groupId ]
                 );
                 return;
@@ -1274,7 +1340,6 @@ class ImportEventFeedCommand extends Command
                 $this->addPendingEvent('organization', $organizationId, $event);
                 return;
             }
-
         }
         $team
             ->setCategory($category)
@@ -1695,7 +1760,7 @@ class ImportEventFeedCommand extends Command
                 // Submit the solution
                 $contest    = $this->em->getRepository(Contest::class)->find($this->contestId);
                 $submission = $this->submissionService->submitSolution(
-                    $team, $contestProblem, $contest, $language, $filesToSubmit,
+                    $team, null, $contestProblem, $contest, $language, $filesToSubmit, 'shadowing', null,
                     null, $entryPoint, $submissionId, $submitTime,
                     $message
                 );
@@ -1828,11 +1893,15 @@ class ImportEventFeedCommand extends Command
 
         $this->em->flush();
 
+        $contestId = $submission->getContest()->getCid();
+        $teamId = $submission->getTeam()->getTeamid();
+        $problemId = $submission->getProblem()->getProbid();
+
         // Now we need to update the scoreboard cache for this cell to get this judgement result in
         $this->em->clear();
-        $contest = $this->em->getRepository(Contest::class)->find($submission->getCid());
-        $team    = $this->em->getRepository(Team::class)->find($submission->getTeamid());
-        $problem = $this->em->getRepository(Problem::class)->find($submission->getProbid());
+        $contest = $this->em->getRepository(Contest::class)->find($contestId);
+        $team    = $this->em->getRepository(Team::class)->find($teamId);
+        $problem = $this->em->getRepository(Problem::class)->find($problemId);
         $this->scoreboardService->calculateScoreRow($contest, $team, $problem);
 
         $this->processPendingEvents('judgement', $judgement->getExternalid());
@@ -1910,11 +1979,11 @@ class ImportEventFeedCommand extends Command
             ->from(Testcase::class, 't')
             ->select('t')
             ->andWhere('t.problem = :problem')
-            ->andWhere('t.rank = :rank')
+            ->andWhere('t.ranknumber = :ranknumber')
             ->setParameter(':problem', $problem->getProblem())
-            ->setParameter(':rank', $rank)
+            ->setParameter(':ranknumber', $rank)
             ->getQuery()
-            ->getSingleResult();
+            ->getOneOrNullResult();
 
         if ($testcase === null) {
             $this->logger->error(
@@ -1950,7 +2019,7 @@ class ImportEventFeedCommand extends Command
             // Get all pending events
             $pending = $this->pendingEvents[$type][$id];
             // Mark them as non-pending. Note that they might depend on more events,
-            // but then they'll be readded automatically in the correct place
+            // but then they'll be re-added automatically in the correct place
             unset($this->pendingEvents[$type][$id]);
             foreach ($pending as $event) {
                 $this->logger->debug(
@@ -1984,20 +2053,24 @@ class ImportEventFeedCommand extends Command
     /**
      * @param Submission $submission
      * @throws NonUniqueResultException
-     * @throws \Doctrine\DBAL\DBALException
+     * @throws DBALException
      */
     private function markSubmissionAsValidAndRecalcScore(Submission $submission, bool $valid): void
     {
         $submission->setValid($valid);
+
+        $contestId = $submission->getContest()->getCid();
+        $teamId = $submission->getTeam()->getTeamid();
+        $problemId = $submission->getProblem()->getProbid();
 
         $this->em->flush();
         $this->eventLogService->log('submissions', $submission->getSubmitid(),
             $valid ? EventLogService::ACTION_CREATE : EventLogService::ACTION_DELETE,
             $this->contestId);
 
-        $contest = $this->em->getRepository(Contest::class)->find($submission->getCid());
-        $team = $this->em->getRepository(Team::class)->find($submission->getTeamid());
-        $problem = $this->em->getRepository(Problem::class)->find($submission->getProbid());
+        $contest = $this->em->getRepository(Contest::class)->find($contestId);
+        $team = $this->em->getRepository(Team::class)->find($teamId);
+        $problem = $this->em->getRepository(Problem::class)->find($problemId);
         $this->scoreboardService->calculateScoreRow($contest, $team, $problem);
     }
 }

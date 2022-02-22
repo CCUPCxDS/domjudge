@@ -4,6 +4,8 @@ namespace App\Controller\Jury;
 
 use App\Controller\BaseController;
 use App\Entity\Executable;
+use App\Entity\ExecutableFile;
+use App\Entity\ImmutableExecutable;
 use App\Form\Type\ExecutableType;
 use App\Form\Type\ExecutableUploadType;
 use App\Service\ConfigurationService;
@@ -11,6 +13,7 @@ use App\Service\DOMJudgeService;
 use App\Service\EventLogService;
 use App\Utils\Utils;
 use Doctrine\ORM\EntityManagerInterface;
+use Exception;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\IsGranted;
 use Symfony\Component\Form\Exception\InvalidArgumentException;
 use Symfony\Component\Form\Extension\Core\Type\FileType;
@@ -18,10 +21,8 @@ use Symfony\Component\Form\Extension\Core\Type\SubmitType;
 use Symfony\Component\Form\Extension\Core\Type\TextareaType;
 use Symfony\Component\HttpFoundation\File\UploadedFile;
 use Symfony\Component\HttpFoundation\Request;
-use Symfony\Component\HttpFoundation\StreamedResponse;
-use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
+use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
-use Symfony\Component\HttpKernel\Exception\ServiceUnavailableHttpException;
 use Symfony\Component\HttpKernel\KernelInterface;
 use Symfony\Component\PropertyAccess\PropertyAccess;
 use Symfony\Component\Routing\Annotation\Route;
@@ -57,15 +58,6 @@ class ExecutableController extends BaseController
      */
     protected $eventLogService;
 
-    /**
-     * ExecutableController constructor.
-     *
-     * @param EntityManagerInterface $em
-     * @param DOMJudgeService        $dj
-     * @param ConfigurationService   $config
-     * @param KernelInterface        $kernel
-     * @param EventLogService        $eventLogService
-     */
     public function __construct(
         EntityManagerInterface $em,
         DOMJudgeService $dj,
@@ -82,80 +74,25 @@ class ExecutableController extends BaseController
 
     /**
      * @Route("", name="jury_executables")
-     * @param Request $request
-     * @return \Symfony\Component\HttpFoundation\Response
      */
-    public function indexAction(Request $request)
+    public function indexAction(Request $request) : Response
     {
         $data = [];
         $form = $this->createForm(ExecutableUploadType::class, $data);
         $form->handleRequest($request);
 
-        if ($this->isGranted('ROLE_ADMIN') && $form->isSubmitted() && $form->isValid()) {
-            $propertyFile = 'domjudge-executable.ini';
-            $data         = $form->getData();
-            /** @var UploadedFile[] $archives */
-            $archives = $data['archives'];
-            $id       = null;
-            foreach ($archives as $archive) {
-                $zip         = $this->dj->openZipFile($archive->getRealPath());
-                $filename    = $archive->getClientOriginalName();
-                $id          = substr($filename, 0, strlen($filename) - strlen(".zip"));
-                if ( ! preg_match ('#^[a-z0-9_-]+$#i', $id) ) {
-                    throw new InvalidArgumentException(sprintf("File base name '%s' must contain only alphanumerics", $id));
-                }
-                $description = $id;
-                $type        = $data['type'];
-
-                $propertyData = $zip->getFromName($propertyFile);
-                if ($propertyData !== false) {
-                    $ini_array = parse_ini_string($propertyData);
-                } else {
-                    $ini_array = [];
-                }
-                if (!empty($ini_array)) {
-                    $id          = $ini_array['execid'];
-                    $description = $ini_array['description'];
-                    $type        = $ini_array['type'];
-                }
-
-                $executable = new Executable();
-                $executable
-                    ->setExecid($id)
-                    ->setDescription($description)
-                    ->setType($type)
-                    ->setMd5sum(md5_file($archive->getRealPath()))
-                    ->setZipfile(file_get_contents($archive->getRealPath()));
-                $this->em->persist($executable);
-
-                $zip->close();
-
-                $this->dj->auditlog('executable', $id, 'upload zip', $archive->getClientOriginalName());
-            }
-
-            $this->em->flush();
-
-            if (count($archives) === 1) {
-                return $this->redirectToRoute('jury_executable', ['execId' => $id]);
-            } else {
-                return $this->redirectToRoute('jury_executables');
-            }
-        }
-
         $em = $this->em;
         /** @var Executable[] $executables */
         $executables      = $em->createQueryBuilder()
-            ->select('e as executable, e.execid as execid, length(e.zipfile) as size')
+            ->select('e as executable, e.execid as execid')
             ->from(Executable::class, 'e')
             ->orderBy('e.execid', 'ASC')
             ->getQuery()->getResult();
-        $executable_sizes = array_column($executables, 'size', 'execid');
         $executables      = array_column($executables, 'executable', 'execid');
         $table_fields     = [
             'execid' => ['title' => 'ID', 'sort' => true,],
             'type' => ['title' => 'type', 'sort' => true,],
             'description' => ['title' => 'description', 'sort' => true, 'default_sort' => true],
-            'size' => ['title' => 'size', 'sort' => true,],
         ];
 
         $propertyAccessor  = PropertyAccess::createPropertyAccessor();
@@ -191,13 +128,6 @@ class ExecutableController extends BaseController
                 'link' => $this->generateUrl('jury_executable_download', ['execId' => $e->getExecid()])
             ];
 
-            $execdata['md5sum']['cssclass'] = 'text-monospace small';
-            $execdata                       = array_merge($execdata, [
-                'size' => [
-                    'value' => Utils::printsize((int)$executable_sizes[$e->getExecid()]),
-                    'sortvalue' => (int)$executable_sizes[$e->getExecid()]
-                ],
-            ]);
             $executables_table[]            = [
                 'data' => $execdata,
                 'actions' => $execactions,
@@ -213,13 +143,76 @@ class ExecutableController extends BaseController
     }
 
     /**
-     * @Route("/{execId}", name="jury_executable")
-     * @param Request $request
-     * @param string  $execId
-     * @return \Symfony\Component\HttpFoundation\Response
-     * @throws \Exception
+     * @Route("/add", name="jury_executable_add")
+     * @IsGranted("ROLE_ADMIN")
      */
-    public function viewAction(Request $request, string $execId)
+    public function addAction(Request $request) : Response
+    {
+        $data = [];
+        $form = $this->createForm(ExecutableUploadType::class, $data);
+        $form->handleRequest($request);
+
+        if ($form->isSubmitted() && $form->isValid()){
+            $propertyFile = 'domjudge-executable.ini';
+            $data         = $form->getData();
+            /** @var UploadedFile[] $archives */
+            $archives = $data['archives'];
+            $id       = null;
+            foreach ($archives as $archive) {
+                $zip         = $this->dj->openZipFile($archive->getRealPath());
+                $filename    = $archive->getClientOriginalName();
+                $id          = substr($filename, 0, strlen($filename) - strlen(".zip"));
+                if (! preg_match ('#^[a-z0-9_-]+$#i', $id)) {
+                    throw new InvalidArgumentException(sprintf("File base name '%s' must contain only alphanumerics", $id));
+                }
+                $description = $id;
+                $type        = $data['type'];
+
+                $propertyData = $zip->getFromName($propertyFile);
+                if ($propertyData !== false) {
+                    $ini_array = parse_ini_string($propertyData);
+                } else {
+                    $ini_array = [];
+                }
+                if (!empty($ini_array)) {
+                    $id          = $ini_array['execid'];
+                    $description = $ini_array['description'];
+                    $type        = $ini_array['type'];
+                }
+
+                $immutableExecutable = $this->dj->createImmutableExecutable($zip);
+                $executable = new Executable();
+                $executable
+                    ->setExecid($id)
+                    ->setDescription($description)
+                    ->setType($type)
+                    ->setImmutableExecutable($immutableExecutable);
+                $this->em->persist($executable);
+
+                $zip->close();
+
+                $this->dj->auditlog('executable', $id, 'upload zip', $archive->getClientOriginalName());
+            }
+
+            $this->em->flush();
+
+            if (count($archives) === 1) {
+                return $this->redirectToRoute('jury_executable', ['execId' => $id]);
+            } else {
+                return $this->redirectToRoute('jury_executables');
+            }
+        }
+
+        return $this->render('jury/executable_add.html.twig', [
+            'form' => $form->createView(),
+        ]);
+    }
+
+    /**
+     * @Route("/{execId}", name="jury_executable")
+     * @throws Exception
+     */
+    public function viewAction(Request $request, string $execId) : Response
     {
         /** @var Executable $executable */
         $executable = $this->em->getRepository(Executable::class)->find($execId);
@@ -231,15 +224,14 @@ class ExecutableController extends BaseController
             'executable' => $executable,
             'default_compare' => (string)$this->config->get('default_compare'),
             'default_run' => (string)$this->config->get('default_run'),
+            'default full debug' => (string)$this->config->get('default_full_debug'),
         ]);
     }
 
     /**
      * @Route("/{execId}/content", name="jury_executable_content")
-     * @param string $execId
-     * @return \Symfony\Component\HttpFoundation\Response
      */
-    public function contentAction(string $execId)
+    public function contentAction(string $execId) : Response
     {
         /** @var Executable $executable */
         $executable = $this->em->getRepository(Executable::class)->find($execId);
@@ -252,10 +244,8 @@ class ExecutableController extends BaseController
 
     /**
      * @Route("/{execId}/download", name="jury_executable_download")
-     * @param string $execId
-     * @return \Symfony\Component\HttpFoundation\Response
      */
-    public function downloadAction(string $execId)
+    public function downloadAction(string $execId) : Response
     {
         /** @var Executable $executable */
         $executable = $this->em->getRepository(Executable::class)->find($execId);
@@ -263,31 +253,16 @@ class ExecutableController extends BaseController
             throw new NotFoundHttpException(sprintf('Executable with ID %s not found', $execId));
         }
 
-        $zipFile     = stream_get_contents($executable->getZipfile());
-        $zipFileSize = strlen($zipFile);
-        $filename    = sprintf('%s.zip', $executable->getExecid());
+        $zipFileContent = $executable->getZipfileContent($this->dj->getDomjudgeTmpDir());
+        $filename = sprintf('%s.zip', $executable->getExecid());
 
-        $response = new StreamedResponse();
-        $response->setCallback(function () use ($zipFile) {
-            echo $zipFile;
-        });
-        $response->headers->set('Content-Type', 'application/zip');
-        $response->headers->set('Content-Disposition', 'attachment; filename="' . $filename . '"');
-        $response->headers->set('Content-Length', $zipFileSize);
-        $response->headers->set('Content-Transfer-Encoding', 'binary');
-        $response->headers->set('Connection', 'Keep-Alive');
-        $response->headers->set('Accept-Ranges', 'bytes');
-
-        return $response;
+        return Utils::streamAsBinaryFile($zipFileContent, $filename, 'zip');
     }
 
     /**
      * @Route("/{execId}/download/{index}", name="jury_executable_download_single")
-     * @param string $execId
-     * @param int    $index
-     * @return \Symfony\Component\HttpFoundation\Response
      */
-    public function downloadSingleAction(string $execId, int $index)
+    public function downloadSingleAction(string $execId, int $index) : Response
     {
         /** @var Executable $executable */
         $executable = $this->em->getRepository(Executable::class)->find($execId);
@@ -295,37 +270,23 @@ class ExecutableController extends BaseController
             throw new NotFoundHttpException(sprintf('Executable with ID %s not found', $execId));
         }
 
-        if (!($tempzipFile = tempnam($this->dj->getDomjudgeTmpDir(), "/executable-"))) {
-            throw new ServiceUnavailableHttpException(null, 'Failed to create temporary file');
-        }
-        if (file_put_contents($tempzipFile, stream_get_contents($executable->getZipfile())) === false) {
-            throw new ServiceUnavailableHttpException(null, 'Failed to write zip file to temporary file');
-        }
-
-        $zip = $this->dj->openZipFile($tempzipFile);
-
-        if ($index < 0 || $index >= $zip->numFiles) {
-            throw new BadRequestHttpException(sprintf('File with index %d not found', $index));
+        /** @var ExecutableFile[] $files */
+        $files = array_values($executable->getImmutableExecutable()->getFiles()->toArray());
+        foreach ($files as $file) {
+            if ($file->getRank() == $index) {
+                return Utils::streamAsBinaryFile($file->getFileContent(), $file->getFilename());
+            }
         }
 
-        $filename = basename($zip->getNameIndex($index));
-        if ($filename[strlen($filename) - 1] == "/") {
-            throw new BadRequestHttpException(sprintf('File with index %d is a directory', $index));
-        }
-
-        $content = $zip->getFromIndex($index);
-        return Utils::streamAsBinaryFile($content, $filename);
+        throw new NotFoundHttpException(sprintf('No file with index %d found', $index));
     }
 
     /**
      * @Route("/{execId}/edit", name="jury_executable_edit")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @param string  $execId
-     * @return \Symfony\Component\HttpFoundation\Response
-     * @throws \Exception
+     * @throws Exception
      */
-    public function editAction(Request $request, string $execId)
+    public function editAction(Request $request, string $execId) : Response
     {
         /** @var Executable $executable */
         $executable = $this->em->getRepository(Executable::class)->find($execId);
@@ -364,10 +325,10 @@ class ExecutableController extends BaseController
             $data = $uploadForm->getData();
             /** @var UploadedFile $archive */
             $archive = $data['archive'];
-
-            $executable
-                ->setMd5sum(md5_file($archive->getRealPath()))
-                ->setZipfile(file_get_contents($archive->getRealPath()));
+            $zip = $this->dj->openZipFile($archive->getRealPath());
+            $executable->setImmutableExecutable(
+                $this->dj->createImmutableExecutable($zip)
+            );
             $this->saveEntity($this->em, $this->eventLogService, $this->dj, $executable,
                               $executable->getExecid(), false);
             return $this->redirectToRoute('jury_executable', ['execId' => $executable->getExecid()]);
@@ -383,12 +344,9 @@ class ExecutableController extends BaseController
     /**
      * @Route("/{execId}/delete", name="jury_executable_delete")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @param string  $execId
-     * @return \Symfony\Component\HttpFoundation\Response
-     * @throws \Exception
+     * @return Response
      */
-    public function deleteAction(Request $request, string $execId)
+    public function deleteAction(Request $request, string $execId) : Response
     {
         /** @var Executable $executable */
         $executable = $this->em->getRepository(Executable::class)->find($execId);
@@ -396,18 +354,15 @@ class ExecutableController extends BaseController
             throw new NotFoundHttpException(sprintf('Executable with ID %s not found', $execId));
         }
 
-        return $this->deleteEntity($request, $this->em, $this->dj, $this->eventLogService, $this->kernel, $executable,
-                                   $executable->getDescription(), $this->generateUrl('jury_executables'));
+        return $this->deleteEntities($request, $this->em, $this->dj, $this->eventLogService, $this->kernel,
+                                     [$executable], $this->generateUrl('jury_executables'));
     }
 
     /**
      * @Route("/{execId}/edit-files", name="jury_executable_edit_files")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @param string  $execId
-     * @return \Symfony\Component\HttpFoundation\Response
      */
-    public function editFilesAction(Request $request, string $execId)
+    public function editFilesAction(Request $request, string $execId) : Response
     {
         /** @var Executable $executable */
         $executable = $this->em->getRepository(Executable::class)->find($execId);
@@ -422,7 +377,7 @@ class ExecutableController extends BaseController
         }
 
         $formBuilder = $this->createFormBuilder($data)
-            ->add('submit', SubmitType::class);
+            ->add('submit', SubmitType::class, ['label' => 'Save files']);
 
         foreach ($editorData['files'] as $idx => $content) {
             $formBuilder->add('source' . $idx, TextareaType::class);
@@ -435,33 +390,24 @@ class ExecutableController extends BaseController
         if ($form->isSubmitted() && $form->isValid()) {
             $submittedData = $form->getData();
 
-            if (!($tempzipFile = tempnam($this->dj->getDomjudgeTmpDir(), "/executable-"))) {
-                throw new ServiceUnavailableHttpException(null, 'Failed to create temporary file');
-            }
-            if (file_put_contents($tempzipFile, $executable->getZipfile(true)) === false) {
-                throw new ServiceUnavailableHttpException(null, 'Failed to write zip file to temporary file');
-            }
+            $immutableExecutable = new ImmutableExecutable();
+            $this->em->persist($immutableExecutable);
 
-            $zip = $this->dj->openZipFile($tempzipFile);
             foreach ($editorData['filenames'] as $idx => $filename) {
-                $permission = $opsys = $attr = null;
-                if ($zip->getExternalAttributesName($filename, $opsys, $attr) && $opsys === \ZipArchive::OPSYS_UNIX) {
-                    $permission = $attr;
-                }
+                $newContent = str_replace("\r\n", "\n", $submittedData['source' . $idx]);
 
-                $newContent = $submittedData['source' . $idx];
-                $zip->addFromString($filename, str_replace("\r\n", "\n", $newContent));
-
-                if ($permission !== null) {
-                    $zip->setExternalAttributesName($filename, $opsys, $permission);
-                }
+                $executableFile = new ExecutableFile();
+                $executableFile
+                    ->setRank($idx)
+                    ->setImmutableExecutable($immutableExecutable)
+                    ->setIsExecutable($editorData['executableBits'][$idx])
+                    ->setFilename($filename)
+                    ->setFileContent($newContent);
+                $this->em->persist($executableFile);
+                $immutableExecutable->addFile($executableFile);
             }
 
-            $zip->close();
-
-            $executable
-                ->setMd5sum(md5_file($tempzipFile))
-                ->setZipfile(file_get_contents($tempzipFile));
+            $executable->setImmutableExecutable($immutableExecutable);
             $this->em->flush();
             $this->dj->auditlog('executable', $executable->getExecid(), 'updated');
 
@@ -476,59 +422,48 @@ class ExecutableController extends BaseController
 
     /**
      * Get the data to use for the executable editor
-     * @param Executable $executable
-     * @return array
      */
-    protected function dataForEditor(Executable $executable)
+    protected function dataForEditor(Executable $executable) : array
     {
-        if (!($tempzipFile = tempnam($this->dj->getDomjudgeTmpDir(), "/executable-"))) {
-            throw new ServiceUnavailableHttpException(null, 'Failed to create temporary file');
-        }
-        if (file_put_contents($tempzipFile, $executable->getZipfile(true)) === false) {
-            throw new ServiceUnavailableHttpException(null, 'Failed to write zip file to temporary file');
-        }
+        $immutable_executable = $executable->getImmutableExecutable();
 
-        $zip           = $this->dj->openZipFile($tempzipFile);
-        $skippedBinary = [];
         $filenames     = [];
-        $files         = [];
+        $file_contents = [];
         $aceFilenames  = [];
-        for ($idx = 0; $idx < $zip->numFiles; $idx++) {
-            $filename = basename($zip->getNameIndex($idx));
-            if ($filename[strlen($filename) - 1] == "/") {
-                continue;
-            }
-
-            $content = $zip->getFromIndex($idx);
+        $skippedBinary = [];
+        $executableBits = [];
+        foreach ($immutable_executable->getFiles() as $file) {
+            /** @var ExecutableFile $file */
+            $filename = $file->getFilename();
+            $content = $file->getFileContent();
             if (!mb_check_encoding($content, 'ASCII')) {
                 $skippedBinary[] = $filename;
                 continue; // skip binary files
             }
-
             $filenames[] = $filename;
-            $files[]     = $content;
+            $file_contents[] = $content;
+            $executableBits[] = $file->isExecutable();
 
             if (strpos($filename, '.') !== false) {
                 $aceFilenames[] = $filename;
             } else {
-                list($firstLine) = explode("\n", $content, 2);
+                [$firstLine] = explode("\n", $content, 2);
                 // If the file does not contain a dot, see if we have a shebang which we can use as filename
                 if (preg_match('/^#!.*\/([^\/]+)$/', $firstLine, $matches)) {
-                    $aceFilenames[] = sprintf('dummy.%s', $matches[1]);
+                    $aceFilenames[] = sprintf('temp.%s', $matches[1]);
                 } else {
                     $aceFilenames[] = $filename;
                 }
             }
         }
 
-        $zip->close();
-
         return [
             'executable' => $executable,
             'skippedBinary' => $skippedBinary,
             'filenames' => $filenames,
             'aceFilenames' => $aceFilenames,
-            'files' => $files,
+            'files' => $file_contents,
+            'executableBits' => $executableBits,
         ];
     }
 }

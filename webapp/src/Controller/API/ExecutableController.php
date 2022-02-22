@@ -3,19 +3,22 @@
 namespace App\Controller\API;
 
 use App\Entity\Executable;
+use App\Entity\ExecutableFile;
+use App\Service\DOMJudgeService;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\NonUniqueResultException;
 use FOS\RestBundle\Controller\AbstractFOSRestController;
 use FOS\RestBundle\Controller\Annotations as Rest;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\IsGranted;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\Security;
-use Swagger\Annotations as SWG;
+use OpenApi\Annotations as OA;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
+use Symfony\Component\HttpKernel\Exception\ServiceUnavailableHttpException;
+use ZipArchive;
 
 /**
- * @Rest\Route("/api/v4/executables", defaults={ "_format" = "json" })
- * @Rest\Prefix("/api/executables")
- * @Rest\NamePrefix("executable_")
- * @SWG\Tag(name="Executables")
+ * @Rest\Route("/executables")
+ * @OA\Tag(name="Executables")
  */
 class ExecutableController extends AbstractFOSRestController
 {
@@ -25,26 +28,30 @@ class ExecutableController extends AbstractFOSRestController
     protected $em;
 
     /**
-     * ExecutableController constructor.
-     * @param EntityManagerInterface $em
+     * @var DOMJudgeService
      */
-    public function __construct(EntityManagerInterface $em)
+    protected $dj;
+
+    public function __construct(
+        EntityManagerInterface $em,
+        DOMJudgeService $dj
+    )
     {
         $this->em = $em;
+        $this->dj = $dj;
     }
 
     /**
      * Get the executable with the given ID
-     * @param string $id
      * @return array|string|null
-     * @throws \Doctrine\ORM\NonUniqueResultException
+     * @throws NonUniqueResultException
      * @Security("is_granted('ROLE_JURY') or is_granted('ROLE_JUDGEHOST')")
      * @Rest\Get("/{id}")
-     * @SWG\Parameter(ref="#/parameters/id")
-     * @SWG\Response(
+     * @OA\Parameter(ref="#/components/parameters/id")
+     * @OA\Response(
      *     response="200",
      *     description="Information about the requested executable",
-     *     @SWG\Schema(type="string", description="Base64-encoded executable contents")
+     *     @OA\JsonContent(type="string", description="Base64-encoded executable contents")
      * )
      */
     public function singleAction(string $id)
@@ -63,8 +70,6 @@ class ExecutableController extends AbstractFOSRestController
             throw new NotFoundHttpException(sprintf('Cannot find executable \'%s\'', $id));
         }
 
-        $contents = stream_get_contents($executable->getZipfile());
-
-        return base64_encode($contents);
+        return base64_encode($executable->getZipfileContent($this->dj->getDomjudgeTmpDir()));
     }
 }

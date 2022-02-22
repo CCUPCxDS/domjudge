@@ -3,17 +3,23 @@
 namespace App\Controller\Jury;
 
 use App\Controller\BaseController;
+use App\Doctrine\DBAL\Types\JudgeTaskType;
 use App\Entity\Contest;
+use App\Entity\DebugPackage;
+use App\Entity\Executable;
 use App\Entity\ExternalJudgement;
 use App\Entity\Judgehost;
+use App\Entity\JudgeTask;
 use App\Entity\Judging;
 use App\Entity\JudgingRun;
 use App\Entity\Language;
 use App\Entity\Problem;
+use App\Entity\QueueTask;
 use App\Entity\Submission;
 use App\Entity\SubmissionFile;
 use App\Entity\Team;
 use App\Entity\Testcase;
+use App\Form\Type\SubmissionsFilterType;
 use App\Service\BalloonService;
 use App\Service\ConfigurationService;
 use App\Service\DOMJudgeService;
@@ -21,9 +27,14 @@ use App\Service\EventLogService;
 use App\Service\ScoreboardService;
 use App\Service\SubmissionService;
 use App\Utils\Utils;
+use Doctrine\DBAL\DBALException;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\EntityRepository;
+use Doctrine\ORM\NonUniqueResultException;
+use Doctrine\ORM\NoResultException;
+use Doctrine\ORM\ORMException;
 use Doctrine\ORM\Query\Expr\Join;
+use Exception;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\IsGranted;
 use Symfony\Bridge\Doctrine\Form\Type\EntityType;
 use Symfony\Component\Form\Extension\Core\Type\SubmitType;
@@ -71,15 +82,6 @@ class SubmissionController extends BaseController
      */
     protected $router;
 
-    /**
-     * SubmissionController constructor.
-     *
-     * @param EntityManagerInterface $em
-     * @param DOMJudgeService        $dj
-     * @param ConfigurationService   $config
-     * @param SubmissionService      $submissionService
-     * @param RouterInterface        $router
-     */
     public function __construct(
         EntityManagerInterface $em,
         DOMJudgeService $dj,
@@ -97,7 +99,7 @@ class SubmissionController extends BaseController
     /**
      * @Route("", name="jury_submissions")
      */
-    public function indexAction(Request $request)
+    public function indexAction(Request $request): Response
     {
         $viewTypes = [0 => 'newest', 1 => 'unverified', 2 => 'unjudged', 3 => 'all'];
         $view      = 0;
@@ -134,15 +136,17 @@ class SubmissionController extends BaseController
             $contests = [$contest->getCid() => $contest];
         }
 
-        $limit = $viewTypes[$view] == 'newest' ? 50 : 0;
+        $latestCount = 50;
+
+        $limit = $viewTypes[$view] == 'newest' ? $latestCount : 0;
 
         /** @var Submission[] $submissions */
-        list($submissions, $submissionCounts) =
+        [$submissions, $submissionCounts] =
             $this->submissionService->getSubmissionList($contests, $restrictions, $limit);
 
         // Load preselected filters
         $filters          = $this->dj->jsonDecode((string)$this->dj->getCookie('domjudge_submissionsfilter') ?: '[]');
-        $filteredProblems = $filteredLanguages = $filteredTeams = [];
+        $filteredProblems = $filteredLanguages = $filteredTeams = $filteredVerdicts = [];
         if (isset($filters['problem-id'])) {
             /** @var Problem[] $filteredProblems */
             $filteredProblems = $this->em->createQueryBuilder()
@@ -173,6 +177,14 @@ class SubmissionController extends BaseController
                 ->getQuery()
                 ->getResult();
         }
+        if (isset($filters['result'])) {
+            $filteredVerdicts = $filters['result'];
+        }
+
+        $verdictsConfig = $this->dj->getDomjudgeEtcDir() . '/verdicts.php';
+        $results = array_keys(include $verdictsConfig);
+        $results[] = 'judging';
+        $results[] = 'queued';
 
         $data = [
             'refresh' => $refresh,
@@ -182,40 +194,34 @@ class SubmissionController extends BaseController
             'submissionCounts' => $submissionCounts,
             'showContest' => count($contests) > 1,
             'hasFilters' => !empty($filters),
+            'results' => $results,
             'filteredProblems' => $filteredProblems,
             'filteredLanguages' => $filteredLanguages,
             'filteredTeams' => $filteredTeams,
+            'filteredResults' => $filteredVerdicts,
             'showExternalResult' => $this->config->get('data_source') ==
                 DOMJudgeService::DATA_SOURCE_CONFIGURATION_AND_LIVE_EXTERNAL,
+            'showTestcases' => count($submissions) <= $latestCount,
         ];
 
         // For ajax requests, only return the submission list partial
         if ($request->isXmlHttpRequest()) {
-            $data['showTestcases'] = true;
             return $this->render('jury/partials/submission_list.html.twig', $data);
         }
+
+        // Build the filter form.
+        $form = $this->createForm(SubmissionsFilterType::class, [
+            "contests" => $contests,
+        ]);
+        $data["form"] = $form->createView();
 
         return $this->render('jury/submissions.html.twig', $data, $response);
     }
 
-    private function parseMetadata($raw_metadata) {
-        // TODO: reduce duplication with judgedaemon code
-        $contents = explode("\n", $raw_metadata);
-        $res = [];
-        foreach($contents as $line) {
-            if (strpos($line, ":") !== false) {
-                list($key, $value) = explode(":", $line, 2);
-                $res[$key] = trim($value);
-            }
-        }
-
-        return $res;
-    }
-
     /**
      * @Route("/{submitId<\d+>}", name="jury_submission")
-     * @throws \Doctrine\ORM\NonUniqueResultException
-     * @throws \Exception
+     * @throws NonUniqueResultException
+     * @throws Exception
      */
     public function viewAction(Request $request, int $submitId)
     {
@@ -230,8 +236,8 @@ class SubmissionController extends BaseController
         if (!isset($judgingId) && isset($rejudgingId)) {
             $judging = $this->em->getRepository(Judging::class)
                 ->findOneBy([
-                                'submitid' => $submitId,
-                                'rejudgingid' => $rejudgingId
+                                'submission' => $submitId,
+                                'rejudging' => $rejudgingId
                             ]);
             if ($judging) {
                 $judgingId = $judging->getJudgingid();
@@ -245,9 +251,10 @@ class SubmissionController extends BaseController
             ->join('s.problem', 'p')
             ->join('s.language', 'l')
             ->join('s.contest', 'c')
+            ->join('s.files', 'f')
             ->leftJoin('s.external_judgements', 'ej', Join::WITH, 'ej.valid = 1')
             ->leftJoin('s.contest_problem', 'cp')
-            ->select('s', 't', 'p', 'l', 'c', 'cp', 'ej')
+            ->select('s', 't', 'p', 'l', 'c', 'partial f.{submitfileid, filename}', 'cp', 'ej')
             ->andWhere('s.submitid = :submitid')
             ->setParameter(':submitid', $submitId)
             ->getQuery()
@@ -307,75 +314,6 @@ class SubmissionController extends BaseController
             }
         }
 
-        $unjudgableReasons = [];
-        if ($selectedJudging === null) {
-            // Determine if this submission is unjudgable
-
-            // First, check if there is an active judgehost that can judge this submission.
-            /** @var Judgehost[] $judgehosts */
-            $judgehosts  = $this->em->createQueryBuilder()
-                ->from(Judgehost::class, 'j')
-                ->leftJoin('j.restriction', 'r')
-                ->select('j', 'r')
-                ->andWhere('j.active = 1')
-                ->getQuery()
-                ->getResult();
-            $canBeJudged = false;
-            foreach ($judgehosts as $judgehost) {
-                if (!$judgehost->getRestriction()) {
-                    $canBeJudged = true;
-                    break;
-                }
-
-                $queryBuilder = $this->em->createQueryBuilder()
-                    ->from(Submission::class, 's')
-                    ->select('s')
-                    ->join('s.language', 'lang')
-                    ->join('s.contest_problem', 'cp')
-                    ->andWhere('s.submitid = :submitid')
-                    ->andWhere('s.judgehost IS NULL')
-                    ->andWhere('lang.allowJudge = 1')
-                    ->andWhere('cp.allowJudge = 1')
-                    ->andWhere('s.valid = 1')
-                    ->setParameter(':submitid', $submission->getSubmitid())
-                    ->setMaxResults(1);
-
-                $restrictions = $judgehost->getRestriction()->getRestrictions();
-                if (isset($restrictions['contest'])) {
-                    $queryBuilder
-                        ->andWhere('s.cid IN (:contests)')
-                        ->setParameter(':contests', $restrictions['contest']);
-                }
-                if (isset($restrictions['problem'])) {
-                    $queryBuilder
-                        ->leftJoin('s.problem', 'p')
-                        ->andWhere('p.probid IN (:problems)')
-                        ->setParameter(':problems', $restrictions['problem']);
-                }
-                if (isset($restrictions['language'])) {
-                    $queryBuilder
-                        ->andWhere('s.langid IN (:languages)')
-                        ->setParameter(':languages', $restrictions['language']);
-                }
-
-                if ($queryBuilder->getQuery()->getOneOrNullResult()) {
-                    $canBeJudged = true;
-                }
-            }
-
-            if (!$canBeJudged) {
-                $unjudgableReasons[] = 'No active judgehost can judge this submission. Edit judgehost restrictions!';
-            }
-
-            if (!$submission->getLanguage()->getAllowJudge()) {
-                $unjudgableReasons[] = 'Submission language is currently not allowed to be judged!';
-            }
-
-            if (!$submission->getContestProblem()->getAllowJudge()) {
-                $unjudgableReasons[] = 'Problem is currently not allowed to be judged!';
-            }
-        }
-
         $outputDisplayLimit    = (int)$this->config->get('output_display_limit');
         $outputTruncateMessage = sprintf("\n[output display truncated after %d B]\n", $outputDisplayLimit);
 
@@ -388,7 +326,7 @@ class SubmissionController extends BaseController
                 ->andWhere('t.problem = :problem')
                 ->setParameter(':judging', $externalJudgement)
                 ->setParameter(':problem', $submission->getProblem())
-                ->orderBy('t.rank');
+                ->orderBy('t.ranknumber');
 
             $externalRunResults = $queryBuilder
                 ->getQuery()
@@ -399,6 +337,23 @@ class SubmissionController extends BaseController
             }
         }
 
+        $judgehosts = $this->em->createQueryBuilder()
+            ->from(JudgeTask::class, 'jt')
+            ->join('jt.judgehost', 'jh')
+            ->select('jh.judgehostid', 'jh.hostname')
+            ->andWhere('jt.judgehost IS NOT NULL')
+            ->andWhere('jt.jobid = :judging')
+            ->setParameter(':judging', $selectedJudging)
+            ->groupBy('jh.hostname')
+            ->orderBy('jh.hostname')
+            ->getQuery()
+            ->getScalarResult();
+        $judgehosts = array_combine(
+            array_column($judgehosts, 'judgehostid'),
+            array_column($judgehosts, 'hostname')
+        );
+
+        $runsOutstanding = false;
         $runs       = [];
         $runsOutput = [];
         $sameTestcaseIds = true;
@@ -412,7 +367,7 @@ class SubmissionController extends BaseController
                 ->andWhere('t.problem = :problem')
                 ->setParameter(':judging', $selectedJudging)
                 ->setParameter(':problem', $submission->getProblem())
-                ->orderBy('t.rank');
+                ->orderBy('t.ranknumber');
             if ($outputDisplayLimit < 0) {
                 $queryBuilder
                     ->addSelect('tc.output AS output_reference')
@@ -424,6 +379,7 @@ class SubmissionController extends BaseController
                 $queryBuilder
                     ->addSelect('TRUNCATE(tc.output, :outputDisplayLimit, :outputTruncateMessage) AS output_reference')
                     ->addSelect('TRUNCATE(jro.output_run, :outputDisplayLimit, :outputTruncateMessage) AS output_run')
+                    ->addSelect('RIGHT(jro.output_run, 50) AS output_run_last_bytes')
                     ->addSelect('TRUNCATE(jro.output_diff, :outputDisplayLimit, :outputTruncateMessage) AS output_diff')
                     ->addSelect('TRUNCATE(jro.output_error, :outputDisplayLimit, :outputTruncateMessage) AS output_error')
                     ->addSelect('TRUNCATE(jro.output_system, :outputDisplayLimit, :outputTruncateMessage) AS output_system')
@@ -436,11 +392,11 @@ class SubmissionController extends BaseController
                 ->getResult();
 
             $judgingRunTestcaseIdsInOrder = $this->em->createQueryBuilder()
-                ->from(JudgingRun::class, 'jr')
-                ->select('jr.testcaseid')
-                ->andWhere('jr.judging = :judging')
+                ->from(JudgeTask::class, 'jt')
+                ->select('jt.testcase_id')
+                ->andWhere('jt.jobid = :judging')
                 ->setParameter(':judging', $selectedJudging)
-                ->orderBy('jr.endtime')
+                ->orderBy('jt.judgetaskid')
                 ->getQuery()
                 ->getScalarResult();
 
@@ -449,32 +405,47 @@ class SubmissionController extends BaseController
                 /** @var Testcase $testcase */
                 $testcase = $runResult[0];
                 if (isset($judgingRunTestcaseIdsInOrder[$cnt])) {
-                    if ($testcase->getTestcaseid() != $judgingRunTestcaseIdsInOrder[$cnt]['testcaseid']) {
+                    if ($testcase->getTestcaseid() != $judgingRunTestcaseIdsInOrder[$cnt]['testcase_id']) {
                         $sameTestcaseIds = false;
                     }
                 }
                 $cnt++;
+                /** @var JudgingRun $firstJudgingRun */
                 $firstJudgingRun = $runResult[0]->getFirstJudgingRun();
+                if ($firstJudgingRun !== null && $firstJudgingRun->getRunresult() === null) {
+                    $runsOutstanding = true;
+                }
                 $runs[] = $runResult[0];
                 unset($runResult[0]);
                 if (empty($runResult['metadata'])) {
-                    $runResult['cpu_time'] = $firstJudgingRun === NULL ? 'n/a' : $firstJudgingRun->getRuntime();
+                    $runResult['cpu_time'] = $firstJudgingRun === null ? 'n/a' : $firstJudgingRun->getRuntime();
                 } else {
-                    $metadata = $this->parseMetadata($runResult['metadata']);
+                    $metadata = $this->dj->parseMetadata($runResult['metadata']);
                     $runResult['cpu_time'] = $metadata['cpu-time'];
                     $runResult['wall_time'] = $metadata['wall-time'];
                     $runResult['memory'] = Utils::printsize((int)$metadata['memory-bytes'], 2);
                     $runResult['exitcode'] = $metadata['exitcode'];
-                    $runResult['signal'] = isset($metadata['signal']) ? $metadata['signal'] : -1;
+                    $runResult['signal'] = $metadata['signal'] ?? -1;
+                    $runResult['output_limit'] = $metadata['output-truncated'];
                 }
                 $runResult['terminated'] = preg_match('/timelimit exceeded.*hard (wall|cpu) time/',
                                                       (string)$runResult['output_system']);
-                $runsOutput[]            = $runResult;
+                $runResult['hostname'] = null;
+                $runResult['judgehostid'] = null;
+                if ($firstJudgingRun && $firstJudgingRun->getJudgeTask() && $firstJudgingRun->getJudgeTask()->getJudgehost()) {
+                    $runResult['hostname'] = $firstJudgingRun->getJudgeTask()->getJudgehost()->getHostname();
+                    $runResult['judgehostid'] = $firstJudgingRun->getJudgeTask()->getJudgehost()->getJudgehostid();
+                }
+                $runResult['is_output_run_truncated'] = preg_match(
+                    '/\[output storage truncated after \d* B\]/',
+                    (string)$runResult['output_run_last_bytes']
+                );
+                $runsOutput[] = $runResult;
             }
         }
 
-        if ($submission->getOrigsubmitid()) {
-            $lastSubmission = $this->em->getRepository(Submission::class)->find($submission->getOrigsubmitid());
+        if ($submission->getOriginalSubmission()) {
+            $lastSubmission = $submission->getOriginalSubmission();
         } else {
             /** @var Submission|null $lastSubmission */
             $lastSubmission = $this->em->createQueryBuilder()
@@ -510,7 +481,7 @@ class SubmissionController extends BaseController
 
             if ($lastJudging !== null) {
                 // Clear the testcases, otherwise Doctrine will use the previous data
-                $this->em->clear(Testcase::class);
+                $this->em->clear();
                 $lastRuns = $this->em->createQueryBuilder()
                     ->from(Testcase::class, 't')
                     ->leftJoin('t.judging_runs', 'jr', Join::WITH, 'jr.judging = :judging')
@@ -518,10 +489,48 @@ class SubmissionController extends BaseController
                     ->andWhere('t.problem = :problem')
                     ->setParameter(':judging', $lastJudging)
                     ->setParameter(':problem', $submission->getProblem())
-                    ->orderBy('t.rank')
+                    ->orderBy('t.ranknumber')
                     ->getQuery()
                     ->getResult();
             }
+        }
+
+        $unjudgableReasons = [];
+        if ($runsOutstanding) {
+            // Determine if this submission is unjudgable.
+
+            $numActiveJudgehosts = (int)$this->em->createQueryBuilder()
+                ->from(Judgehost::class, 'j')
+                ->select('count(j.judgehostid)')
+                ->andWhere('j.active = 1')
+                ->getQuery()
+                ->getSingleScalarResult();
+            if ($numActiveJudgehosts == 0) {
+                $unjudgableReasons[] = 'No active judgehost. Add or enable judgehosts!';
+            }
+
+            if (!$submission->getLanguage()->getAllowJudge()) {
+                $unjudgableReasons[] = 'Submission language is currently not allowed to be judged!';
+            }
+
+            if (!$submission->getContestProblem()->getAllowJudge()) {
+                $unjudgableReasons[] = 'Problem is currently not allowed to be judged!';
+            }
+        }
+
+        if (!isset($judging)) {
+            $requestedOutputCount = 0;
+        } else {
+            $requestedOutputCount = (int)$this->em->createQueryBuilder()
+                ->from(JudgeTask::class, 'jt')
+                ->select('count(jt.judgetaskid)')
+                ->andWhere('jt.type = :type')
+                ->andWhere('jt.jobid = :judgingid')
+                ->andWhere('jt.starttime IS NULL')
+                ->setParameter(':type', JudgeTaskType::DEBUG_INFO)
+                ->setParameter(':judgingid', $judging->getJudgingid())
+                ->getQuery()
+                ->getSingleScalarResult();
         }
 
         $twigData = [
@@ -532,6 +541,8 @@ class SubmissionController extends BaseController
             'selectedJudging' => $selectedJudging,
             'lastJudging' => $lastJudging,
             'runs' => $runs,
+            'runsOutstanding' => $runsOutstanding,
+            'judgehosts' => $judgehosts,
             'sameTestcaseIds' => $sameTestcaseIds,
             'externalRuns' => $externalRuns,
             'runsOutput' => $runsOutput,
@@ -540,6 +551,7 @@ class SubmissionController extends BaseController
             'verificationRequired' => (bool)$this->config->get('verification_required'),
             'claimWarning' => $claimWarning,
             'combinedRunCompare' => $submission->getProblem()->getCombinedRunCompare(),
+            'requestedOutputCount' => $requestedOutputCount,
         ];
 
         if ($selectedJudging === null) {
@@ -554,12 +566,93 @@ class SubmissionController extends BaseController
     }
 
     /**
+     * @Route("/request-full-debug/{jid}", name="request_full_debug")
+     * @throws NonUniqueResultException
+     * @throws Exception
+     */
+    public function requestFullDebug(Request $request, Judging $jid): RedirectResponse
+    {
+        $submission = $jid->getSubmission();
+        /** @var Executable $defaultFullDebugExecutable */
+        $defaultFullDebugExecutable = $this->em
+            ->getRepository(Executable::class)
+            ->findOneBy(['execid' => $this->config->get('default_full_debug')]);
+        if ($defaultFullDebugExecutable === null) {
+            $this->addFlash('error', 'No default full_debug executable specified, please configure one.');
+        } else {
+            $executable = $defaultFullDebugExecutable->getImmutableExecutable();
+            foreach ($jid->getJudgehosts() as $hostname) {
+                $judgehost = $this->em
+                    ->getRepository(Judgehost::class)
+                    ->findOneBy(['hostname' => $hostname]);
+                $judgeTask = new JudgeTask();
+                $judgeTask
+                    ->setType(JudgeTaskType::DEBUG_INFO)
+                    ->setJudgehost($judgehost)
+                    ->setSubmitid($submission->getSubmitid())
+                    ->setPriority(JudgeTask::PRIORITY_HIGH)
+                    ->setJobId($jid->getJudgingid())
+                    ->setUuid($jid->getUuid())
+                    ->setRunScriptId($executable->getImmutableExecId())
+                    ->setRunConfig(json_encode(['hash' => $executable->getHash()]));
+                $this->em->persist($judgeTask);
+            }
+            $this->em->flush();
+        }
+        return $this->redirectToLocalReferrer($this->router, $request, $this->generateUrl('jury_submission', [
+            'submitId' => $jid->getSubmission()->getSubmitid(),
+            'jid' => $jid->getJudgingid(),
+        ]));
+    }
+
+    /**
+     * @Route("/download-full-debug/{debug_package_id}", name="download_full_debug")
+     * @throws NonUniqueResultException
+     * @throws Exception
+     */
+    public function downloadFullDebug(DebugPackage $debugPackage): StreamedResponse
+    {
+        $name = 'debug_package.j' . $debugPackage->getJudging()->getJudgingid()
+            . '.db' . $debugPackage->getDebugPackageId()
+            . '.jh' . $debugPackage->getJudgehost()->getJudgehostid()
+            . '.tar.gz';
+        return Utils::streamAsBinaryFile(file_get_contents($debugPackage->getFilename()), $name);
+    }
+
+    /**
+     * @Route("/request-output/{jid}/{jrid}", name="request_output")
+     * @throws NonUniqueResultException
+     * @throws Exception
+     */
+    public function requestOutput(Request $request, Judging $jid, JudgingRun $jrid): RedirectResponse
+    {
+        $submission = $jid->getSubmission();
+        $testcase = $jrid->getTestcase();
+        $judgeTask = new JudgeTask();
+        $judgeTask
+            ->setType(JudgeTaskType::DEBUG_INFO)
+            ->setJudgehost($jrid->getJudgeTask()->getJudgehost())
+            ->setSubmitid($submission->getSubmitid())
+            ->setPriority(JudgeTask::PRIORITY_HIGH)
+            ->setJobId($jid->getJudgingid())
+            ->setUuid($jid->getUuid())
+            ->setTestcaseId($testcase->getTestcaseid())
+            ->setTestcaseHash($testcase->getMd5sumInput() . '_' . $testcase->getMd5sumOutput());
+        $this->em->persist($judgeTask);
+        $this->em->flush();
+        return $this->redirectToLocalReferrer($this->router, $request, $this->generateUrl('jury_submission', [
+            'submitId' => $jid->getSubmission()->getSubmitid(),
+            'jid' => $jid->getJudgingid(),
+        ]));
+    }
+
+    /**
      * @Route("/by-judging-id/{jid}", name="jury_submission_by_judging")
      */
-    public function viewForJudgingAction(Judging $jid)
+    public function viewForJudgingAction(Judging $jid): RedirectResponse
     {
         return $this->redirectToRoute('jury_submission', [
-            'submitId' => $jid->getSubmitid(),
+            'submitId' => $jid->getSubmission()->getSubmitid(),
             'jid' => $jid->getJudgingid(),
         ]);
     }
@@ -567,17 +660,17 @@ class SubmissionController extends BaseController
     /**
      * @Route("/by-external-judgement-id/{externalJudgement}", name="jury_submission_by_external_judgement")
      */
-    public function viewForExternalJudgementAction(ExternalJudgement $externalJudgement)
+    public function viewForExternalJudgementAction(ExternalJudgement $externalJudgement): RedirectResponse
     {
         return $this->redirectToRoute('jury_submission', [
-            'submitId' => $externalJudgement->getSubmitid(),
+            'submitId' => $externalJudgement->getSubmission()->getSubmitid(),
         ]);
     }
 
     /**
      * @Route("/by-external-id/{externalId}", name="jury_submission_by_external_id")
      */
-    public function viewForExternalIdAction(string $externalId)
+    public function viewForExternalIdAction(string $externalId): RedirectResponse
     {
         if (!$this->dj->getCurrentContest()) {
             throw new BadRequestHttpException("Cannot determine submission from external ID without selecting a contest.");
@@ -585,7 +678,7 @@ class SubmissionController extends BaseController
 
         $submission = $this->em->getRepository(Submission::class)
             ->findOneBy([
-                            'cid' => $this->dj->getCurrentContest()->getCid(),
+                            'contest' => $this->dj->getCurrentContest(),
                             'externalid' => $externalId
                         ]);
 
@@ -600,19 +693,16 @@ class SubmissionController extends BaseController
 
     /**
      * @Route("/{submission}/runs/{contest}/{run}/team-output", name="jury_submission_team_output")
-     * @param Submission $submission
-     * @param Contest    $contest
-     * @param JudgingRun $run
      */
-    public function teamOutputAction(Submission $submission, Contest $contest, JudgingRun $run)
+    public function teamOutputAction(Submission $submission, Contest $contest, JudgingRun $run): StreamedResponse
     {
-        if ($run->getJudging()->getSubmitid() !== $submission->getSubmitid() || $submission->getCid() !== $contest->getCid()) {
+        if ($run->getJudging()->getSubmission()->getSubmitid() !== $submission->getSubmitid() || $submission->getContest()->getCid() !== $contest->getCid()) {
             throw new BadRequestHttpException('Problem while fetching team output');
         }
 
-        $filename = sprintf('p%d.t%d.%s.run%d.team%d.out', $submission->getProbid(), $run->getTestcase()->getRank(),
+        $filename = sprintf('p%d.t%d.%s.run%d.team%d.out', $submission->getProblem()->getProbid(), $run->getTestcase()->getRank(),
                             $submission->getContestProblem()->getShortname(), $run->getRunid(),
-                            $submission->getTeamid());
+                            $submission->getTeam()->getTeamid());
 
         $outputRun = $run->getOutput()->getOutputRun();
         return Utils::streamAsBinaryFile($outputRun, $filename);
@@ -620,18 +710,18 @@ class SubmissionController extends BaseController
 
     /**
      * @Route("/{submission}/source", name="jury_submission_source")
-     * @throws \Doctrine\ORM\NonUniqueResultException
+     * @throws NonUniqueResultException
      */
-    public function sourceAction(Request $request, Submission $submission)
+    public function sourceAction(Request $request, Submission $submission): Response
     {
         if ($request->query->has('fetch')) {
             /** @var SubmissionFile $file */
             $file = $this->em->createQueryBuilder()
                 ->from(SubmissionFile::class, 'file')
                 ->select('file')
-                ->andWhere('file.rank = :rank')
+                ->andWhere('file.ranknumber = :ranknumber')
                 ->andWhere('file.submission = :submission')
-                ->setParameter(':rank', $request->query->get('fetch'))
+                ->setParameter(':ranknumber', $request->query->get('fetch'))
                 ->setParameter(':submission', $submission)
                 ->getQuery()
                 ->getOneOrNullResult();
@@ -656,15 +746,15 @@ class SubmissionController extends BaseController
             ->select('file')
             ->andWhere('file.submission = :submission')
             ->setParameter(':submission', $submission)
-            ->orderBy('file.rank')
+            ->orderBy('file.ranknumber')
             ->getQuery()
             ->getResult();
 
         $originalSubmission = $originalFiles = null;
 
-        if ($submission->getOrigsubmitid()) {
+        if ($submission->getOriginalSubmission()) {
             /** @var Submission $originalSubmission */
-            $originalSubmission = $this->em->getRepository(Submission::class)->find($submission->getOrigsubmitid());
+            $originalSubmission = $this->em->getRepository(Submission::class)->find($submission->getOriginalSubmission()->getSubmitid());
 
             /** @var SubmissionFile[] $files */
             $originalFiles = $this->em->createQueryBuilder()
@@ -672,7 +762,7 @@ class SubmissionController extends BaseController
                 ->select('file')
                 ->andWhere('file.submission = :submission')
                 ->setParameter(':submission', $originalSubmission)
-                ->orderBy('file.rank')
+                ->orderBy('file.ranknumber')
                 ->getQuery()
                 ->getResult();
 
@@ -680,14 +770,14 @@ class SubmissionController extends BaseController
             $oldSubmission = $this->em->createQueryBuilder()
                 ->from(Submission::class, 's')
                 ->select('s')
-                ->andWhere('s.probid = :probid')
-                ->andWhere('s.langid = :langid')
+                ->andWhere('s.problem = :probid')
+                ->andWhere('s.language = :langid')
                 ->andWhere('s.submittime < :submittime')
-                ->andWhere('s.origsubmitid = :origsubmitid')
-                ->setParameter(':probid', $submission->getProbid())
-                ->setParameter(':langid', $submission->getLangid())
+                ->andWhere('s.originalSubmission = :origsubmitid')
+                ->setParameter(':probid', $submission->getProblem())
+                ->setParameter(':langid', $submission->getLanguage())
                 ->setParameter(':submittime', $submission->getSubmittime())
-                ->setParameter(':origsubmitid', $submission->getOrigsubmitid())
+                ->setParameter(':origsubmitid', $submission->getOriginalSubmission())
                 ->orderBy('s.submittime', 'DESC')
                 ->setMaxResults(1)
                 ->getQuery()
@@ -696,13 +786,13 @@ class SubmissionController extends BaseController
             $oldSubmission = $this->em->createQueryBuilder()
                 ->from(Submission::class, 's')
                 ->select('s')
-                ->andWhere('s.teamid = :teamid')
-                ->andWhere('s.probid = :probid')
-                ->andWhere('s.langid = :langid')
+                ->andWhere('s.team = :teamid')
+                ->andWhere('s.problem = :probid')
+                ->andWhere('s.language = :langid')
                 ->andWhere('s.submittime < :submittime')
-                ->setParameter(':teamid', $submission->getTeamid())
-                ->setParameter(':probid', $submission->getProbid())
-                ->setParameter(':langid', $submission->getLangid())
+                ->setParameter(':teamid', $submission->getTeam())
+                ->setParameter(':probid', $submission->getProblem())
+                ->setParameter(':langid', $submission->getLanguage())
                 ->setParameter(':submittime', $submission->getSubmittime())
                 ->orderBy('s.submittime', 'DESC')
                 ->setMaxResults(1)
@@ -716,7 +806,7 @@ class SubmissionController extends BaseController
             ->select('file')
             ->andWhere('file.submission = :submission')
             ->setParameter(':submission', $oldSubmission)
-            ->orderBy('file.rank')
+            ->orderBy('file.ranknumber')
             ->getQuery()
             ->getResult();
 
@@ -737,10 +827,8 @@ class SubmissionController extends BaseController
 
     /**
      * @Route("/{submission}/edit-source", name="jury_submission_edit_source")
-     * @param Request    $request
-     * @param Submission $submission
      * @return RedirectResponse|Response
-     * @throws \Exception
+     * @throws Exception
      */
     public function editSourceAction(Request $request, Submission $submission)
     {
@@ -758,7 +846,7 @@ class SubmissionController extends BaseController
             ->select('file')
             ->andWhere('file.submission = :submission')
             ->setParameter(':submission', $submission)
-            ->orderBy('file.rank')
+            ->orderBy('file.ranknumber')
             ->getQuery()
             ->getResult();
 
@@ -831,10 +919,13 @@ class SubmissionController extends BaseController
             }
             $submittedSubmission = $this->submissionService->submitSolution(
                 $team,
+                $this->dj->getUser(),
                 $submittedData['problem'],
                 $submission->getContest(),
                 $language,
                 $filesToSubmit,
+                'edit/resubmit',
+                $this->getUser()->getUsername(),
                 $submission->getOriginalSubmission() ?? $submission,
                 $entryPoint,
                 null,
@@ -858,58 +949,102 @@ class SubmissionController extends BaseController
             'submission' => $submission,
             'files' => $files,
             'form' => $form->createView(),
-            'selected' => $request->query->get('rank'),
+            'selected' => $request->query->get('ranknumber'),
         ]);
+    }
+
+    /**
+     * @Route("/{judgingId<\d+>}/request-remaining", name="jury_submission_request_remaining", methods={"POST"})
+     * @throws DBALException
+     * @throws Exception
+     */
+    public function requestRemainingRuns(Request $request, int $judgingId): RedirectResponse
+    {
+        /** @var Judging $judging */
+        $judging = $this->em->getRepository(Judging::class)->find($judgingId);
+        if ($judging === null) {
+            throw new BadRequestHttpException("Unknown judging with '$judgingId' requested.");
+        }
+
+        if ($judging->getResult() === null) {
+            $this->addFlash('warning', 'Please be patient, this judging is still in progress.');
+        } elseif ($judging->getJudgeCompletely()) {
+            $this->addFlash('warning', 'This judging was already requested to be judged completely.');
+        } else {
+            $numRequested = $this->em->getConnection()->executeUpdate(
+                'UPDATE judgetask SET valid=1'
+                . ' WHERE jobid=:jobid'
+                . ' AND judgehostid IS NULL',
+                [
+                    ':jobid' => $judgingId,
+                ]
+            );
+            $judging->setJudgeCompletely(true);
+            $this->em->flush();
+
+            $submission = $judging->getSubmission();
+            $queueTask = new QueueTask();
+            $queueTask->setJobId($judging->getJudgingid())
+                ->setPriority(JudgeTask::PRIORITY_LOW)
+                ->setTeam($submission->getTeam())
+                ->setTeamPriority((int)$submission->getSubmittime())
+                ->setStartTime(null);
+            $this->em->persist($queueTask);
+            $this->em->flush();
+            if ($numRequested == 0) {
+                $this->addFlash('warning', 'No more remaining runs to be judged.');
+            } else {
+                $this->addFlash('info', "Requested $numRequested remaining runs to be judged.");
+            }
+        }
+        return $this->redirectToLocalReferrer($this->router, $request,
+            $this->generateUrl('jury_submission_by_judging', ['jid' => $judgingId])
+        );
     }
 
     /**
      * @Route("/{submitId<\d+>}/update-status", name="jury_submission_update_status", methods={"POST"})
      * @IsGranted("ROLE_ADMIN")
-     * @param EventLogService   $eventLogService
-     * @param ScoreboardService $scoreboardService
-     * @param Request           $request
-     * @param int               $submitId
-     * @return RedirectResponse
-     * @throws \Doctrine\DBAL\DBALException
-     * @throws \Exception
+     * @throws DBALException
+     * @throws Exception
      */
     public function updateStatusAction(
         EventLogService $eventLogService,
         ScoreboardService $scoreboardService,
         Request $request,
         int $submitId
-    ) {
+    ): RedirectResponse {
         $submission = $this->em->getRepository(Submission::class)->find($submitId);
         $valid      = $request->request->getBoolean('valid');
         $submission->setValid($valid);
         $this->em->flush();
 
+        $contestId = $submission->getContest()->getCid();
+        $teamId    = $submission->getTeam()->getTeamid();
+        $problemId = $submission->getProblem()->getProbid();
+
         // KLUDGE: We can't log an "undelete", so we re-"create".
         // FIXME: We should also delete/recreate any dependent judging(runs).
         $eventLogService->log('submission', $submission->getSubmitid(), ($valid ? 'create' : 'delete'),
-                              $submission->getCid(), null, null, $valid);
+                              $submission->getContest()->getCid(), null, null, $valid);
         $this->dj->auditlog('submission', $submission->getSubmitid(),
                                          'marked ' . ($valid ? 'valid' : 'invalid'));
-        $contest = $this->em->getRepository(Contest::class)->find($submission->getCid());
-        $team    = $this->em->getRepository(Team::class)->find($submission->getTeamid());
-        $problem = $this->em->getRepository(Problem::class)->find($submission->getProbid());
+        $contest = $this->em->getRepository(Contest::class)->find($contestId);
+        $team    = $this->em->getRepository(Team::class)->find($teamId);
+        $problem = $this->em->getRepository(Problem::class)->find($problemId);
         $scoreboardService->calculateScoreRow($contest, $team, $problem);
 
-        return $this->redirectToRoute('jury_submission', ['submitId' => $submission->getSubmitid()]);
+        return $this->redirectToLocalReferrer($this->router, $request,
+            $this->generateUrl('jury_submission', ['submitId' => $submission->getSubmitid()])
+        );
     }
 
     /**
      * @Route("/{judgingId<\d+>}/verify", name="jury_judging_verify", methods={"POST"})
-     * @param EventLogService   $eventLogService
-     * @param ScoreboardService $scoreboardService
-     * @param BalloonService    $balloonService
-     * @param Request           $request
-     * @param int               $judgingId
-     * @return RedirectResponse
-     * @throws \Doctrine\DBAL\DBALException
-     * @throws \Doctrine\ORM\NoResultException
-     * @throws \Doctrine\ORM\NonUniqueResultException
-     * @throws \Doctrine\ORM\ORMException
+     * @throws DBALException
+     * @throws NoResultException
+     * @throws NonUniqueResultException
+     * @throws ORMException
      */
     public function verifyAction(
         EventLogService $eventLogService,
@@ -917,7 +1052,7 @@ class SubmissionController extends BaseController
         BalloonService $balloonService,
         Request $request,
         int $judgingId
-    ) {
+    ): RedirectResponse {
         $this->em->transactional(function () use ($eventLogService, $request, $judgingId) {
             /** @var Judging $judging */
             $judging  = $this->em->getRepository(Judging::class)->find($judgingId);
@@ -935,7 +1070,7 @@ class SubmissionController extends BaseController
             if ((bool)$this->config->get('verification_required')) {
                 // Log to event table (case of no verification required is handled
                 // in the REST API API/JudgehostController::addJudgingRunAction
-                $eventLogService->log('judging', $judging->getJudgingid(), 'update', $judging->getCid());
+                $eventLogService->log('judging', $judging->getJudgingid(), 'update', $judging->getContest()->getCid());
             }
         });
 
@@ -964,30 +1099,27 @@ class SubmissionController extends BaseController
             $balloonService->updateBalloons($judging->getContest(), $judging->getSubmission(), $judging);
         }
 
-        // Redirect to referrer page after verification or back to submission page when unverifying.
+        // Redirect to local referrer page but fall back to same defaults
         if ($request->request->getBoolean('verified')) {
-            $redirect = $request->request->get('redirect', $this->generateUrl('jury_submissions'));
+            $this->addFlash('info', "Verified judging j$judgingId");
+            $redirect = $this->generateUrl('jury_submissions');
         } else {
+            $this->addFlash('info', "Unmarked judging j$judgingId as verified");
             $redirect = $this->generateUrl('jury_submission_by_judging', ['jid' => $judgingId]);
         }
 
-        return $this->redirect($redirect);
+        return $this->redirectToLocalReferrer($this->router, $request, $redirect);
     }
 
 
     /**
      * @Route("/shadow-difference/{extjudgementid<\d+>}/verify", name="jury_shadow_difference_verify", methods={"POST"})
-     * @param EventLogService $eventLogService
-     * @param Request         $request
-     * @param int             $extjudgementid
-     *
-     * @return RedirectResponse
      */
     public function verifyShadowDifferenceAction(
         EventLogService $eventLogService,
         Request $request,
         int $extjudgementid
-    ) {
+    ): RedirectResponse {
         /** @var ExternalJudgement $judgement */
         $judgement  = $this->em->getRepository(ExternalJudgement::class)->find($extjudgementid);
         $this->em->transactional(function () use ($eventLogService, $request, $judgement) {
@@ -1003,22 +1135,17 @@ class SubmissionController extends BaseController
                 $verified ? 'set verified' : 'set unverified');
         });
 
-        // Redirect to referrer page after verification or back to submission page when unverifying.
+        // Redirect to local referrer page but fall back to same defaults
         if ($request->request->getBoolean('verified')) {
-            $redirect = $request->request->get('redirect', $this->generateUrl('jury_shadow_differences'));
+            $redirect = $this->generateUrl('jury_shadow_differences');
         } else {
             $redirect = $this->generateUrl('jury_submission_by_external_judgement', ['externalJudgement' => $extjudgementid]);
         }
 
-        return $this->redirect($redirect);
+        return $this->redirectToLocalReferrer($this->router, $request, $redirect);
     }
 
-    /**
-     * @param SubmissionFile[] $files
-     * @param SubmissionFile[] $oldFiles
-     * @return array
-     */
-    protected function determineFileChanged(array $files, array $oldFiles)
+    protected function determineFileChanged(array $files, array $oldFiles): array
     {
         $result = [
             'added' => [],
@@ -1060,14 +1187,7 @@ class SubmissionController extends BaseController
         return $result;
     }
 
-    /**
-     * @param Judging|ExternalJudgement|null $judging
-     * @param Request                        $request
-     * @param string                         $claimWarning
-     *
-     * @return RedirectResponse|null
-     */
-    protected function processClaim($judging, Request $request, ?string &$claimWarning)
+    protected function processClaim($judging, Request $request, ?string &$claimWarning) : ?RedirectResponse
     {
         $user   = $this->dj->getUser();
         $action = ($request->get('claim') || $request->get('claimdiff')) ? 'claim' : 'unclaim';
@@ -1099,9 +1219,11 @@ class SubmissionController extends BaseController
                 $this->dj->auditlog($auditLogType, $auditLogId, $action . 'ed');
 
                 if ($action === 'claim') {
-                    return $this->redirectToRoute('jury_submission', ['submitId' => $judging->getSubmitid()]);
+                    return $this->redirectToRoute('jury_submission', ['submitId' => $judging->getSubmission()->getSubmitid()]);
                 } else {
-                    return $this->redirectToRoute('jury_submissions');
+                    return $this->redirectToLocalReferrer($this->router, $request,
+                        $this->generateUrl('jury_submissions')
+                    );
                 }
             }
         }

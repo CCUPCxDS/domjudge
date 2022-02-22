@@ -91,46 +91,54 @@ machines.
 
   The judgehost requires Linux cgroup support for memory and swap accounting.
   Platforms that do not provide this support (some virtualization environments,
-  for example WSL 1 / 2) will not work with the judgehost.
+  for example WSL 1) will not work with the judgehost. See our `wiki <https://github.com/DOMjudge/domjudge/wiki/Running-DOMjudge-in-WSL>`_ for information about DOMjudge and WSL.
 
 Copyright and licencing
 -----------------------
 
 DOMjudge is developed by Jaap Eldering, Nicky Gerritsen, Keith Johnson,
-Thijs Kinkhorst and Tobias Werth; Peter van de Werken has retired as developer.
+Thijs Kinkhorst, Mart Pluijmaekers, Michael Vasseur and Tobias Werth;
+Peter van de Werken has retired as developer.
 Many other people have contributed:
 Michael Baer,
+Jelle Besseling,
 Jeroen Bransen,
 Matt Claycomb,
 Stijn van Drongelen,
 Rob Franken,
 Marc Furon,
 Ragnar Groot Koerkamp,
+Kihoon Han,
 Matt Hermes,
 Michał Kaczanowicz,
 Jacob Kleerekoper,
 Jason Klein,
 Andreas Kohn,
+Yevgeny Kazakov,
+Blaz Korecic,
 Ruud Koot,
 Ilya Kornakov,
 Jan Kuipers,
 Robin Lee,
 Tom Levy,
 Richard Lobb,
+Shuibin Long,
 Alex Muntada,
 Dominik Paulus,
 Bert Peters,
-Mart Pluijmaekers,
 Ludo Pulles,
 Tobias Polzer,
 Jeroen Schot,
 Matt Steele,
 Shuhei Takahashi,
-Michael Vasseur,
 Sergei Vorobev,
 Hoai-Thu Vuong,
+Sheldon Warkentin,
+Christopher Weyand,
 Jeroen van Wolffelaar,
-and Github users mpsijm, sylxjtu.
+Tim "S.D.Eagle" Zeitz,
+XiaoYang,
+and Github users mpsijm, sylxjtu, s911415.
 Some code has been ported from the ETH Zurich fork by Christoph
 Krautz, Thomas Rast et al.
 
@@ -169,12 +177,12 @@ Contact
 The DOMjudge homepage can be found at: https://www.domjudge.org/
 
 We have a low volume `mailing list for announcements
-<https://www.domjudge.org/mailman/listinfo/domjudge-announce>`_
+<https://www.domjudge.org/mailman/postorius/lists/domjudge-announce.domjudge.org/>`_
 of new releases.
 The authors can be reached through the development mailing list.
 You need to be subscribed before you can post. See the
 `development list information page
-<https://www.domjudge.org/mailman/listinfo/domjudge-devel>`_
+<https://www.domjudge.org/mailman/postorius/lists/domjudge-devel.domjudge.org/>`_
 for subscription and more details.
 
 There is a wiki which collects other pieces of information about

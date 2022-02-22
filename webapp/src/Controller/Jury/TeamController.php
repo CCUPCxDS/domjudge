@@ -8,6 +8,7 @@ use App\Entity\Role;
 use App\Entity\Team;
 use App\Entity\User;
 use App\Form\Type\TeamType;
+use App\Service\AssetUpdateService;
 use App\Service\ConfigurationService;
 use App\Service\DOMJudgeService;
 use App\Service\EventLogService;
@@ -15,15 +16,18 @@ use App\Service\ScoreboardService;
 use App\Service\SubmissionService;
 use App\Utils\Utils;
 use Doctrine\ORM\EntityManagerInterface;
+use Doctrine\ORM\NonUniqueResultException;
+use Exception;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\IsGranted;
 use Symfony\Component\Asset\Packages;
+use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\HttpKernel\KernelInterface;
 use Symfony\Component\PropertyAccess\PropertyAccess;
 use Symfony\Component\Routing\Annotation\Route;
-
 
 /**
  * @Route("/jury/teams")
@@ -57,32 +61,30 @@ class TeamController extends BaseController
     protected $eventLogService;
 
     /**
-     * TeamController constructor.
-     *
-     * @param EntityManagerInterface $em
-     * @param DOMJudgeService        $dj
-     * @param ConfigurationService   $config
-     * @param KernelInterface        $kernel
-     * @param EventLogService        $eventLogService
+     * @var AssetUpdateService
      */
+    protected $assetUpdater;
+
     public function __construct(
         EntityManagerInterface $em,
         DOMJudgeService $dj,
         ConfigurationService $config,
         KernelInterface $kernel,
-        EventLogService $eventLogService
+        EventLogService $eventLogService,
+        AssetUpdateService $assetUpdater
     ) {
         $this->em              = $em;
         $this->dj              = $dj;
         $this->config          = $config;
         $this->eventLogService = $eventLogService;
         $this->kernel          = $kernel;
+        $this->assetUpdater    = $assetUpdater;
     }
 
     /**
      * @Route("", name="jury_teams")
      */
-    public function indexAction(Request $request, Packages $assetPackage)
+    public function indexAction(Request $request, Packages $assetPackage): Response
     {
         /** @var Team[] $teams */
         $teams = $this->em->createQueryBuilder()
@@ -90,7 +92,7 @@ class TeamController extends BaseController
             ->from(Team::class, 't')
             ->leftJoin('t.contests', 'c')
             ->leftJoin('t.affiliation', 'a')
-            ->join('t.category', 'cat')
+            ->leftJoin('t.category', 'cat')
             ->leftJoin('cat.contests', 'cc')
             ->orderBy('cat.sortorder', 'ASC')
             ->addOrderBy('t.name', 'ASC')
@@ -215,8 +217,6 @@ class TeamController extends BaseController
                     'value' => $t->getAffiliation()->getShortname(),
                     'title' => $t->getAffiliation()->getName()
                 ];
-            } else {
-                $teamdata['affiliation'] = ['value' => '&nbsp;'];
             }
 
             // render IP address nicely
@@ -230,8 +230,10 @@ class TeamController extends BaseController
             foreach ($t->getContests() as $c) {
                 $teamContests[$c->getCid()] = true;
             }
-            foreach ($t->getCategory()->getContests() as $c) {
-                $teamContests[$c->getCid()] = true;
+            if ($t->getCategory()) {
+                foreach ($t->getCategory()->getContests() as $c) {
+                    $teamContests[$c->getCid()] = true;
+                }
             }
             // merge in the rest of the data
             $teamdata = array_merge($teamdata, [
@@ -251,7 +253,7 @@ class TeamController extends BaseController
                 'data' => $teamdata,
                 'actions' => $teamactions,
                 'link' => $this->generateUrl('jury_team', ['teamId' => $t->getTeamId()]),
-                'cssclass' => "category" . $t->getCategory()->getCategoryId() .
+                'cssclass' => ($t->getCategory() ? ("category" . $t->getCategory()->getCategoryId()) : '') .
                     ($t->getEnabled() ? '' : ' disabled'),
             ];
         }
@@ -264,11 +266,8 @@ class TeamController extends BaseController
 
     /**
      * @Route("/{teamId<\d+>}", name="jury_team")
-     * @param int               $teamId
-     * @param ScoreboardService $scoreboardService
-     * @param SubmissionService $submissionService
-     * @return \Symfony\Component\HttpFoundation\RedirectResponse|\Symfony\Component\HttpFoundation\Response
-     * @throws \Exception
+     * @return RedirectResponse|Response
+     * @throws Exception
      */
     public function viewAction(
         Request $request,
@@ -296,10 +295,10 @@ class TeamController extends BaseController
         ];
 
         $currentContest = $this->dj->getCurrentContest();
-        if ($request->query->has('cid')) {
-            if (isset($this->dj->getCurrentContests()[$request->query->get('cid')])) {
-                $currentContest = $this->dj->getCurrentContests()[$request->query->get('cid')];
-            }
+        if ($request->query->has('cid')
+            && isset($this->dj->getCurrentContests()[$request->query->get('cid')])
+        ) {
+            $currentContest = $this->dj->getCurrentContests()[$request->query->get('cid')];
         }
 
         if ($currentContest) {
@@ -349,7 +348,7 @@ class TeamController extends BaseController
         $data['restrictionText']    = $restrictionText;
         $data['submissions']        = $submissions;
         $data['submissionCounts']   = $submissionCounts;
-        $data['showExternalResult'] = $this->config->get('data_source') ==
+        $data['showExternalResult'] = $this->config->get('data_source') ===
             DOMJudgeService::DATA_SOURCE_CONFIGURATION_AND_LIVE_EXTERNAL;
 
         if ($request->isXmlHttpRequest()) {
@@ -364,10 +363,8 @@ class TeamController extends BaseController
     /**
      * @Route("/{teamId<\d+>}/edit", name="jury_team_edit")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @param int     $teamId
-     * @return \Symfony\Component\HttpFoundation\RedirectResponse|\Symfony\Component\HttpFoundation\Response
-     * @throws \Exception
+     * @return RedirectResponse|Response
+     * @throws Exception
      */
     public function editAction(Request $request, int $teamId)
     {
@@ -382,6 +379,7 @@ class TeamController extends BaseController
         $form->handleRequest($request);
 
         if ($form->isSubmitted() && $form->isValid()) {
+            $this->assetUpdater->updateAssets($team);
             $this->saveEntity($this->em, $this->eventLogService, $this->dj, $team,
                               $team->getTeamid(), false);
             return $this->redirect($this->generateUrl(
@@ -399,10 +397,8 @@ class TeamController extends BaseController
     /**
      * @Route("/{teamId<\d+>}/delete", name="jury_team_delete")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @param int     $teamId
-     * @return \Symfony\Component\HttpFoundation\RedirectResponse|\Symfony\Component\HttpFoundation\Response
-     * @throws \Exception
+     * @return RedirectResponse|Response
+     * @throws Exception
      */
     public function deleteAction(Request $request, int $teamId)
     {
@@ -412,23 +408,21 @@ class TeamController extends BaseController
             throw new NotFoundHttpException(sprintf('Team with ID %s not found', $teamId));
         }
 
-        return $this->deleteEntity($request, $this->em, $this->dj, $this->eventLogService, $this->kernel,
-                                   $team, $team->getEffectiveName(), $this->generateUrl('jury_teams'));
+        return $this->deleteEntities($request, $this->em, $this->dj, $this->eventLogService, $this->kernel,
+                                     [$team], $this->generateUrl('jury_teams'));
     }
 
     /**
      * @Route("/add", name="jury_team_add")
      * @IsGranted("ROLE_ADMIN")
-     * @param Request $request
-     * @return \Symfony\Component\HttpFoundation\Response
-     * @throws \Doctrine\ORM\NonUniqueResultException
-     * @throws \Exception
+     * @return Response
+     * @throws NonUniqueResultException
+     * @throws Exception
      */
-    public function addAction(Request $request)
+    public function addAction(Request $request): Response
     {
         $team = new Team();
-        $team->setAddUserForTeam(true);
-        $team->addUser(new User());
+        $team->setAddUserForTeam(Team::CREATE_NEW_USER);
         $form = $this->createForm(TeamType::class, $team);
 
         $form->handleRequest($request);
@@ -436,28 +430,22 @@ class TeamController extends BaseController
         if ($form->isSubmitted() && $form->isValid()) {
             /** @var User $user */
             $user = $team->getUsers()->first();
-            if (!$team->getAddUserForTeam()) {
-                // If we do not want to add a user, remove it again
-                $team->removeUser($user);
-            } else {
-                // Otherwise, add the team role to it
-                /** @var Role $role */
-                $role = $this->em->createQueryBuilder()
-                    ->from(Role::class, 'r')
-                    ->select('r')
-                    ->andWhere('r.dj_role = :team')
-                    ->setParameter(':team', 'team')
-                    ->getQuery()
-                    ->getOneOrNullResult();
+            if ($team->getAddUserForTeam() === Team::CREATE_NEW_USER) {
+                // Create a user for the team
+                $user = new User();
+                $user->setUsername($team->getAddUserForTeam());
+                $team->addUser($user);
+                // Make sure the user has the team role to make validation work
+                $role = $this->em->getRepository(Role::class)->findOneBy(['dj_role' => 'team']);
                 $user->addUserRole($role);
-                $user->setTeam($team);
-                // Also set the user's name to the team name
+                // Set the user's name to the team name when creating a new user
                 $user->setName($team->getEffectiveName());
-                $this->em->persist($user);
+            } elseif ($team->getAddUserForTeam() === Team::ADD_EXISTING_USER) {
+                $team->addUser($team->getExistingUser());
             }
             $this->em->persist($team);
-            $this->saveEntity($this->em, $this->eventLogService, $this->dj, $team,
-                              $team->getTeamid(), true);
+            $this->assetUpdater->updateAssets($team);
+            $this->saveEntity($this->em, $this->eventLogService, $this->dj, $team, null, true);
             return $this->redirect($this->generateUrl(
                 'jury_team',
                 ['teamId' => $team->getTeamid()]

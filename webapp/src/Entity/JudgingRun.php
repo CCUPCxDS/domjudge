@@ -8,6 +8,7 @@ use JMS\Serializer\Annotation as Serializer;
 
 /**
  * Result of a testcase run.
+ *
  * @ORM\Entity()
  * @ORM\Table(
  *     name="judging_run",
@@ -22,7 +23,6 @@ use JMS\Serializer\Annotation as Serializer;
  */
 class JudgingRun extends BaseApiEntity
 {
-
     /**
      * @var int
      *
@@ -38,28 +38,17 @@ class JudgingRun extends BaseApiEntity
 
     /**
      * @var int
-     * @ORM\Column(type="integer", name="judgingid", length=4,
-     *     options={"comment"="Judging ID","unsigned"=true},
-     *     nullable=false)
-     * @Serializer\SerializedName("judgement_id")
-     * @Serializer\Type("string")
-     */
-    private $judgingid;
-
-    /**
-     * @var int
-     * @ORM\Column(type="integer", name="testcaseid", length=4,
-     *     options={"comment"="Testcase ID","unsigned"=true},
-     *     nullable=false)
+     * @ORM\Column(type="integer", name="judgetaskid", length=4,
+     *     options={"comment"="JudgeTask ID","unsigned"=true,"default"=NULL},
+     *     nullable=true)
      * @Serializer\Exclude()
      */
-    private $testcaseid;
+    private $judgetaskid;
 
     /**
      * @var string
      * @ORM\Column(type="string", name="runresult", length=32,
-     *     options={"comment"="Result of this run, NULL if not finished yet",
-     *              "default"="NULL"},
+     *     options={"comment"="Result of this run, NULL if not finished yet"},
      *     nullable=true)
      * @Serializer\Exclude()
      */
@@ -68,8 +57,7 @@ class JudgingRun extends BaseApiEntity
     /**
      * @var double
      * @ORM\Column(type="float", name="runtime",
-     *     options={"comment"="Submission running time on this testcase",
-     *              "default"="NULL"},
+     *     options={"comment"="Submission running time on this testcase"},
      *     nullable=true)
      * @Serializer\Exclude()
      */
@@ -79,7 +67,7 @@ class JudgingRun extends BaseApiEntity
      * @var double
      * @ORM\Column(type="decimal", precision=32, scale=9, name="endtime",
      *     options={"comment"="Time run judging ended", "unsigned"=true},
-     *     nullable=false)
+     *     nullable=true)
      * @Serializer\Exclude()
      */
     private $endtime;
@@ -109,6 +97,13 @@ class JudgingRun extends BaseApiEntity
      */
     private $output;
 
+    /**
+     * @ORM\ManyToOne(targetEntity="JudgeTask", inversedBy="judging_runs")
+     * @ORM\JoinColumn(name="judgetaskid", referencedColumnName="judgetaskid")
+     * @Serializer\Exclude()
+     */
+    private $judgetask;
+
     public function __construct()
     {
         $this->output = new ArrayCollection();
@@ -124,223 +119,131 @@ class JudgingRun extends BaseApiEntity
         return $this->runid;
     }
 
-    /**
-     * Set judgingid
-     *
-     * @param integer $judgingid
-     *
-     * @return JudgingRun
-     */
-    public function setJudgingid($judgingid)
+    public function setJudgeTaskId(int $judgetaskid): JudgingRun
     {
-        $this->judgingid = $judgingid;
-
+        $this->judgetaskid = $judgetaskid;
         return $this;
     }
 
-    /**
-     * Get judgingid
-     *
-     * @return integer
-     */
-    public function getJudgingid()
+    public function getJudgeTaskId(): ?int
     {
-        return $this->judgingid;
+        return $this->judgetaskid;
     }
 
-    /**
-     * Set testcaseid
-     *
-     * @param integer $testcaseid
-     *
-     * @return JudgingRun
-     */
-    public function setTestcaseid($testcaseid)
+    public function getJudgeTask(): ?JudgeTask
     {
-        $this->testcaseid = $testcaseid;
+        return $this->judgetask;
+    }
 
+    public function setJudgeTask(JudgeTask $judgeTask): JudgingRun
+    {
+        $this->judgetask = $judgeTask;
         return $this;
     }
 
-    /**
-     * Get testcaseid
-     *
-     * @return integer
-     */
-    public function getTestcaseid()
-    {
-        return $this->testcaseid;
-    }
-
-    /**
-     * Set runresult
-     *
-     * @param string $runresult
-     *
-     * @return JudgingRun
-     */
-    public function setRunresult($runresult)
+    public function setRunresult(string $runresult): JudgingRun
     {
         $this->runresult = $runresult;
-
         return $this;
     }
 
-    /**
-     * Get runresult
-     *
-     * @return string
-     */
-    public function getRunresult()
+    public function getRunresult(): ?string
     {
         return $this->runresult;
     }
 
-    /**
-     * Set runtime
-     *
-     * @param float $runtime
-     *
-     * @return JudgingRun
-     */
-    public function setRuntime($runtime)
+    public function setRuntime(float $runtime): JudgingRun
     {
         $this->runtime = $runtime;
-
         return $this;
     }
 
     /**
-     * Get runtime
-     *
-     * @return float
      * @Serializer\VirtualProperty()
      * @Serializer\SerializedName("run_time")
      * @Serializer\Type("float")
      */
-    public function getRuntime()
+    public function getRuntime(): ?float
     {
         return Utils::roundedFloat($this->runtime);
     }
 
-    /**
-     * Set endtime
-     *
-     * @param float $endtime
-     *
-     * @return JudgingRun
-     */
-    public function setEndtime($endtime)
+    /** @param string|float $endtime */
+    public function setEndtime($endtime): JudgingRun
     {
         $this->endtime = $endtime;
-
         return $this;
     }
 
-    /**
-     * Get endtime
-     *
-     * @return float
-     */
+    /** @return string|float */
     public function getEndtime()
     {
         return $this->endtime;
     }
 
     /**
-     * Get the absolute end time for this run
-     *
-     * @return string
      * @Serializer\VirtualProperty()
      * @Serializer\SerializedName("time")
      * @Serializer\Type("string")
      */
-    public function getAbsoluteEndTime()
+    public function getAbsoluteEndTime(): string
     {
         return Utils::absTime($this->getEndtime());
     }
 
     /**
-     * Get the relative end time for this run
-     *
-     * @return string
      * @Serializer\VirtualProperty()
      * @Serializer\SerializedName("contest_time")
      * @Serializer\Type("string")
      */
-    public function getRelativeEndTime()
+    public function getRelativeEndTime(): string
     {
         return Utils::relTime($this->getEndtime() - $this->getJudging()->getContest()->getStarttime());
     }
 
-    /**
-     * Set judging
-     *
-     * @param \App\Entity\Judging $judging
-     *
-     * @return JudgingRun
-     */
-    public function setJudging(\App\Entity\Judging $judging = null)
+    public function setJudging(?Judging $judging = null): JudgingRun
     {
         $this->judging = $judging;
-
         return $this;
     }
 
-    /**
-     * Get judging
-     *
-     * @return \App\Entity\Judging
-     */
-    public function getJudging()
+    public function getJudging(): Judging
     {
         return $this->judging;
     }
 
     /**
-     * Set testcase
-     *
-     * @param \App\Entity\Testcase $testcase
-     *
-     * @return JudgingRun
+     * @Serializer\VirtualProperty()
+     * @Serializer\SerializedName("judgement_id")
+     * @Serializer\Type("string")
      */
-    public function setTestcase(\App\Entity\Testcase $testcase = null)
+    public function getJudgingId(): int
+    {
+        return $this->getJudging()->getJudgingid();
+    }
+
+    public function setTestcase(?Testcase $testcase = null): JudgingRun
     {
         $this->testcase = $testcase;
-
         return $this;
     }
 
-    /**
-     * Get testcase
-     *
-     * @return \App\Entity\Testcase
-     */
-    public function getTestcase()
+    public function getTestcase(): Testcase
     {
         return $this->testcase;
     }
 
     /**
-     * Get testcase rank
-     * @return int
      * @Serializer\VirtualProperty()
      * @Serializer\SerializedName("ordinal")
      * @Serializer\Type("int")
      */
-    public function getTestcaseRank()
+    public function getTestcaseRank(): int
     {
         return $this->getTestcase()->getRank();
     }
 
-    /**
-     * Set output
-     *
-     * @param JudgingRunOutput $output
-     *
-     * @return JudgingRun
-     */
-    public function setOutput(JudgingRunOutput $output)
+    public function setOutput(JudgingRunOutput $output): JudgingRun
     {
         $this->output->clear();
         $this->output->add($output);
@@ -349,12 +252,7 @@ class JudgingRun extends BaseApiEntity
         return $this;
     }
 
-    /**
-     * Get output
-     *
-     * @return JudgingRunOutput
-     */
-    public function getOutput()
+    public function getOutput(): ?JudgingRunOutput
     {
         return $this->output->first() ?: null;
     }

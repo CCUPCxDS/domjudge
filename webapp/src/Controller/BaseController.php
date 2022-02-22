@@ -12,12 +12,19 @@ use App\Entity\TeamCategory;
 use App\Service\DOMJudgeService;
 use App\Service\EventLogService;
 use App\Utils\Utils;
-use Doctrine\Common\Inflector\Inflector;
+use Doctrine\DBAL\DBALException;
+use Doctrine\Inflector\InflectorFactory;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Mapping\MappingException;
+use Doctrine\ORM\NonUniqueResultException;
+use Doctrine\ORM\NoResultException;
+use Exception;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
 use Symfony\Component\HttpKernel\KernelInterface;
 use Symfony\Component\PropertyAccess\PropertyAccess;
@@ -35,22 +42,34 @@ abstract class BaseController extends AbstractController
 {
     /**
      * Check whether the referrer in the request is of the current application
-     * @param RouterInterface $router
-     * @param Request         $request
-     * @return bool
      */
-    protected function isLocalReferrer(RouterInterface $router, Request $request)
+    protected function isLocalReferer(RouterInterface $router, Request $request): bool
     {
-        if ($referrer = $request->headers->get('referer')) {
+        if ($referer = $request->headers->get('referer')) {
             $prefix = sprintf('%s%s', $request->getSchemeAndHttpHost(), $request->getBasePath());
-            if (strpos($referrer, $prefix) === 0) {
-                $path = substr($referrer, strlen($prefix));
-                try {
-                    $router->match($path);
-                    return true;
-                } catch (ResourceNotFoundException $e) {
-                    return false;
-                }
+            return $this->isLocalRefererUrl($router, $referer, $prefix);
+        }
+
+        return false;
+    }
+
+    /**
+     * Check whether the given referer is local
+     */
+    protected function isLocalRefererUrl(RouterInterface $router, string $referer, string $prefix): bool
+    {
+        if (strpos($referer, $prefix) === 0) {
+            $path = substr($referer, strlen($prefix));
+            $context = $router->getContext();
+            $method = $context->getMethod();
+            $context->setMethod('GET');
+            try {
+                $router->match($path);
+                return true;
+            } catch (ResourceNotFoundException $e) {
+                return false;
+            } finally {
+                $context->setMethod($method);
             }
         }
 
@@ -59,14 +78,10 @@ abstract class BaseController extends AbstractController
 
     /**
      * Redirect to the referrer if it is a known (local) route, otherwise redirect to the given URL
-     * @param RouterInterface $router
-     * @param Request         $request
-     * @param string          $defaultUrl
-     * @return \Symfony\Component\HttpFoundation\RedirectResponse
      */
-    protected function redirectToLocalReferrer(RouterInterface $router, Request $request, string $defaultUrl)
+    protected function redirectToLocalReferrer(RouterInterface $router, Request $request, string $defaultUrl): RedirectResponse
     {
-        if ($this->isLocalReferrer($router, $request)) {
+        if ($this->isLocalReferer($router, $request)) {
             return $this->redirect($request->headers->get('referer'));
         }
 
@@ -81,18 +96,19 @@ abstract class BaseController extends AbstractController
      * @param object                 $entity
      * @param mixed                  $id
      * @param bool                   $isNewEntity
-     * @throws \Exception
+     * @throws Exception
      */
     protected function saveEntity(
         EntityManagerInterface $entityManager,
         EventLogService $eventLogService,
         DOMJudgeService $DOMJudgeService,
-        $entity,
+        object $entity,
         $id,
         bool $isNewEntity
-    ) {
+    ): void {
         $auditLogType = Utils::tableForEntity($entity);
 
+        $entityManager->persist($entity);
         $entityManager->flush();
 
         // If we have no ID but we do have a Doctrine entity, automatically
@@ -122,34 +138,10 @@ abstract class BaseController extends AbstractController
     }
 
     /**
-     * Perform the delete for the given entity
-     *
-     * @param Request                $request
-     * @param EntityManagerInterface $entityManager
-     * @param DOMJudgeService        $DOMJudgeService
-     * @param EventLogService        $eventLogService
-     * @param KernelInterface        $kernel
-     * @param                        $entity
-     * @param string                 $description
-     * @param string                 $redirectUrl
-     * @return \Symfony\Component\HttpFoundation\Response
-     * @throws \Doctrine\DBAL\DBALException
-     * @throws \Doctrine\ORM\NoResultException
-     * @throws \Doctrine\ORM\NonUniqueResultException
+     * Helper function to get the database structure for an object.
      */
-    protected function deleteEntity(
-        Request $request,
-        EntityManagerInterface $entityManager,
-        DOMJudgeService $DOMJudgeService,
-        EventLogService $eventLogService,
-        KernelInterface $kernel,
-        $entity,
-        string $description,
-        string $redirectUrl
-    ) {
-        // Determine all the relationships between all tables using Doctrine cache
-        $dir       = realpath(sprintf('%s/src/Entity', $kernel->getProjectDir()));
-        $files     = glob($dir . '/*.php');
+    protected function getDatabaseRelations(array $files, EntityManagerInterface $entityManager): array
+    {
         $relations = [];
         foreach ($files as $file) {
             $parts      = explode('/', $file);
@@ -162,7 +154,6 @@ abstract class BaseController extends AbstractController
                 $tableRelations = [];
                 foreach ($metadata->getAssociationMappings() as $associationMapping) {
                     if (isset($associationMapping['joinColumns']) && count($associationMapping['joinColumns']) === 1) {
-
                         foreach ($associationMapping['joinColumns'] as $joinColumn) {
                             $type                                = $joinColumn['onDelete'] ?? null;
                             $tableRelations[$associationMapping['fieldName']] = [
@@ -177,74 +168,201 @@ abstract class BaseController extends AbstractController
                 $relations[$class] = $tableRelations;
             }
         }
+        return $relations;
+    }
 
+    /**
+     * Handle the actual removal of an entity and the dependencies in the database.
+     */
+    protected function commitDeleteEntity(
+        $entity,
+        DOMJudgeService $DOMJudgeService,
+        EntityManagerInterface $entityManager,
+        array $primaryKeyData,
+        $eventLogService
+    ): void
+    {
+        // Used to remove data from the rank and score caches
+        $teamId = null;
+        if ($entity instanceof Team) {
+            $teamId = $entity->getTeamid();
+        }
+
+        // Get the contests to trigger the event for. We do this before
+        // deleting the entity, since linked data might have vanished
+        $contestsForEntity = $this->contestsForEntity($entity, $DOMJudgeService);
+
+        $cid = null;
+        // Remember the cid to use it in the EventLog later
+        if ($entity instanceof Contest) {
+            $cid = $entity->getCid();
+        }
+        $entityManager->transactional(function () use ($entityManager, $entity) {
+            if ($entity instanceof Problem) {
+                // Deleting problem is a special case: its dependent tables do not
+                // form a tree, and a delete to judging_run can only cascade from
+                // judging, not from testcase. Since MySQL does not define the
+                // order of cascading deletes, we need to manually first cascade
+                // via submission -> judging -> judging_run.
+                $entityManager->getConnection()->executeQuery(
+                    'DELETE FROM submission WHERE probid = :probid',
+                    [':probid' => $entity->getProbid()]
+                );
+                // Also delete internal errors that are "connected" to this problem.
+                $disabledJson = '{"kind":"problem","probid":' . $entity->getProbid() . '}';
+                $entityManager->getConnection()->executeQuery(
+                    'DELETE FROM internal_error WHERE disabled = :disabled',
+                    [':disabled' => $disabledJson]
+                );
+                $entityManager->clear();
+                $entity = $entityManager->getRepository(Problem::class)->find($entity->getProbid());
+            }
+            $entityManager->remove($entity);
+        });
+
+        // Add an audit log entry
+        $auditLogType = Utils::tableForEntity($entity);
+        $DOMJudgeService->auditlog($auditLogType, implode(', ', $primaryKeyData), 'deleted');
+
+        // Trigger the delete event
+        if ($endpoint = $eventLogService->endpointForEntity($entity)) {
+            foreach ($contestsForEntity as $contest) {
+                // When the $entity is a contest it has no id anymore after the EntityManager->remove
+                // for this reason we either remember it or check all other contests and use their cid
+                if (!$entity instanceof Contest) {
+                    $cid = $contest->getCid();
+                }
+                // TODO: cascade deletes. Maybe use getDependentEntities()?
+                $eventLogService->log($endpoint, $primaryKeyData[0],
+                    EventLogService::ACTION_DELETE,
+                    $cid, null, null, false);
+            }
+        }
+
+        if ($entity instanceof Team) {
+            // No need to do this in a transaction, since the chance of a team
+            // with same ID being created at the same time is negligible.
+            $entityManager->getConnection()->executeQuery(
+                'DELETE FROM scorecache WHERE teamid = :teamid',
+                [':teamid' => $teamId]
+            );
+            $entityManager->getConnection()->executeQuery(
+                'DELETE FROM rankcache WHERE teamid = :teamid',
+                [':teamid' => $teamId]
+            );
+        }
+    }
+
+    protected function buildDeleteTree(
+        array $entities,
+        array $relations,
+        EntityManagerInterface $entityManager
+    ): array
+    {
         $isError          = false;
-        $messages         = [];
         $propertyAccessor = PropertyAccess::createPropertyAccessor();
-        $readableType     = str_replace('_', ' ', Utils::tableForEntity($entity));
-        $metadata         = $entityManager->getClassMetadata(get_class($entity));
+        $inflector        = InflectorFactory::create()->build();
+        $readableType     = str_replace('_', ' ', Utils::tableForEntity($entities[0]));
+        $metadata         = $entityManager->getClassMetadata(get_class($entities[0]));
         $primaryKeyData   = [];
-        foreach ($metadata->getIdentifierColumnNames() as $primaryKeyColumn) {
-            $primaryKeyColumnValue = $propertyAccessor->getValue($entity, $primaryKeyColumn);
-            $primaryKeyData[]      = $primaryKeyColumnValue;
+        $messages         = [];
+        foreach ($entities as $entity) {
+            foreach ($metadata->getIdentifierColumnNames() as $primaryKeyColumn) {
+                $primaryKeyColumnValue = $propertyAccessor->getValue($entity, $primaryKeyColumn);
+                $primaryKeyData[]      = $primaryKeyColumnValue;
 
-            // Check all relationships
-            foreach ($relations as $table => $tableRelations) {
-                foreach ($tableRelations as $column => $constraint) {
-                    // If the target class and column match, check if there are any entities with this value
-                    if ($constraint['target'] === $class && $constraint['targetColumn'] === $primaryKeyColumn) {
-                        $count = (int)$entityManager->createQueryBuilder()
-                            ->from($table, 't')
-                            ->select(sprintf('COUNT(t.%s) AS cnt', $column))
-                            ->andWhere(sprintf('t.%s = :value', $column))
-                            ->setParameter(':value', $primaryKeyColumnValue)
-                            ->getQuery()
-                            ->getSingleScalarResult();
-                        if ($count > 0) {
-                            $parts              = explode('\\', $table);
-                            $targetEntityType   = $parts[count($parts) - 1];
-                            $targetReadableType = str_replace(
-                                '_', ' ',
-                                Inflector::tableize(Inflector::pluralize($targetEntityType))
-                            );
+                // Check all relationships.
+                foreach ($relations as $table => $tableRelations) {
+                    foreach ($tableRelations as $column => $constraint) {
+                        // If the target class and column match, check if there are any entities with this value.
+                        if ($constraint['targetColumn'] === $primaryKeyColumn && $constraint['target'] === get_class($entity)) {
+                            $count = (int)$entityManager->createQueryBuilder()
+                                ->from($table, 't')
+                                ->select(sprintf('COUNT(t.%s) AS cnt', $column))
+                                ->andWhere(sprintf('t.%s = :value', $column))
+                                ->setParameter(':value', $primaryKeyColumnValue)
+                                ->getQuery()
+                                ->getSingleScalarResult();
+                            if ($count > 0) {
+                                $parts              = explode('\\', $table);
+                                $targetEntityType   = $parts[count($parts) - 1];
+                                $targetReadableType = str_replace(
+                                    '_', ' ',
+                                    $inflector->tableize($inflector->pluralize($targetEntityType))
+                                );
 
-                            switch ($constraint['type']) {
-                                case 'CASCADE':
-                                    $message           = sprintf('Cascade to %s', $targetReadableType);
-                                    $dependentEntities = $this->getDependentEntities($table, $relations);
-                                    if (!empty($dependentEntities)) {
-                                        $dependentEntitiesReadable = [];
-                                        foreach ($dependentEntities as $dependentEntity) {
-                                            $parts                       = explode('\\', $dependentEntity);
-                                            $dependentEntityType         = $parts[count($parts) - 1];
-                                            $dependentEntitiesReadable[] = str_replace(
-                                                '_', ' ',
-                                                Inflector::tableize(Inflector::pluralize($dependentEntityType))
+                                switch ($constraint['type']) {
+                                    case 'CASCADE':
+                                        $message           = sprintf('Cascade to %s', $targetReadableType);
+                                        $dependentEntities = $this->getDependentEntities($table, $relations);
+                                        if (!empty($dependentEntities)) {
+                                            $dependentEntitiesReadable = [];
+                                            foreach ($dependentEntities as $dependentEntity) {
+                                                $parts                       = explode('\\', $dependentEntity);
+                                                $dependentEntityType         = $parts[count($parts) - 1];
+                                                $dependentEntitiesReadable[] = str_replace(
+                                                    '_', ' ',
+                                                    $inflector->tableize($inflector->pluralize($dependentEntityType))
+                                                );
+                                            }
+                                            $message .= sprintf(
+                                                ', and possibly to dependent entities %s',
+                                                implode(', ', $dependentEntitiesReadable)
                                             );
                                         }
-                                        $message .= sprintf(
-                                            ', and possibly to dependent entities %s',
-                                            implode(', ', $dependentEntitiesReadable)
-                                        );
-                                    }
-                                    $messages[] = $message;
-                                    break;
-                                case 'SET NULL':
-                                    $messages[] = sprintf('Create dangling references in %s', $targetReadableType);
-                                    break;
-                                case null:
-                                    $isError  = true;
-                                    $messages = [
-                                        sprintf('%s with %s "%s" is still referenced in %s, cannot delete.',
-                                                ucfirst($readableType), $primaryKeyColumn, $primaryKeyColumnValue,
-                                                $targetReadableType)
-                                    ];
-                                    break 4;
+                                        $messages[] = $message;
+                                        break;
+                                    case 'SET NULL':
+                                        $messages[] = sprintf('Create dangling references in %s', $targetReadableType);
+                                        break;
+                                    case null:
+                                        $isError  = true;
+                                        $messages = [
+                                            sprintf('%s with %s "%s" is still referenced in %s, cannot delete.',
+                                                    ucfirst($readableType), $primaryKeyColumn, $primaryKeyColumnValue,
+                                                    $targetReadableType)
+                                        ];
+                                        break 4;
+                                }
                             }
                         }
                     }
                 }
             }
+        }
+        return [$isError, $primaryKeyData, $messages];
+    }
+
+    /**
+     * Perform delete operation for the given entities.
+     *
+     * @throws DBALException
+     * @throws NoResultException
+     * @throws NonUniqueResultException
+     */
+    protected function deleteEntities(
+        Request $request,
+        EntityManagerInterface $entityManager,
+        DOMJudgeService $DOMJudgeService,
+        EventLogService $eventLogService,
+        KernelInterface $kernel,
+        array $entities,
+        string $redirectUrl
+    ) : Response {
+        // Assume that we only delete entities of the same class.
+        foreach ($entities as $entity) {
+            assert(get_class($entities[0]) === get_class($entity));
+        }
+        // Determine all the relationships between all tables using Doctrine cache.
+        $dir          = realpath(sprintf('%s/src/Entity', $kernel->getProjectDir()));
+        $files        = glob($dir . '/*.php');
+        $relations    = $this->getDatabaseRelations($files, $entityManager);
+        $readableType = str_replace('_', ' ', Utils::tableForEntity($entities[0]));
+        $messages     = [];
+
+        [$isError, $primaryKeyData, $deleteTreeMessages] = $this->buildDeleteTree($entities, $relations, $entityManager);
+        if (!empty($deleteTreeMessages)) {
+            $messages = $deleteTreeMessages;
         }
 
         if ($request->isMethod('POST')) {
@@ -252,103 +370,46 @@ abstract class BaseController extends AbstractController
                 throw new BadRequestHttpException(reset($messages));
             }
 
-            $entityId = null;
-            if ($entity instanceof Team) {
-                $entityId = $entity->getTeamid();
+            $msgList = [];
+            foreach ($entities as $entity) {
+                $this->commitDeleteEntity($entity, $DOMJudgeService, $entityManager, $primaryKeyData, $eventLogService);
+                $description = $entity->getShortDescription();
+                $msgList[] = sprintf('Successfully deleted %s %s "%s"',
+                                     $readableType, implode(', ', $primaryKeyData), $description);
             }
 
-            // Get the contests to trigger the event for. We do this before
-            // deleting the entity, since linked data might have vanished
-            $contestsForEntity = $this->contestsForEntity($entity, $DOMJudgeService);
-
-            $cid = null;
-            // Remember the cid to use it in the EventLog later
-            if ($entity instanceof Contest) {
-                $cid = $entity->getCid();
-            }
-            $entityManager->transactional(function () use ($entityManager, $entity) {
-                if ($entity instanceof Problem) {
-                    // Deleting problem is a special case: its dependent tables do not
-                    // form a tree, and a delete to judging_run can only cascade from
-                    // judging, not from testcase. Since MySQL does not define the
-                    // order of cascading deletes, we need to manually first cascade
-                    // via submission -> judging -> judging_run.
-                    $entityManager->getConnection()->executeQuery(
-                        'DELETE FROM submission WHERE probid = :probid',
-                        [':probid' => $entity->getProbid()]
-                    );
-                    // Also delete internal errors that are "connected" to this problem.
-                    $disabledJson = '{"kind":"problem","probid":' . $entity->getProbid() . '}';
-                    $entityManager->getConnection()->executeQuery(
-                        'DELETE FROM internal_error WHERE disabled = :disabled',
-                        [':disabled' => $disabledJson]
-                    );
-                    $entityManager->clear();
-                    $entity = $entityManager->getRepository(Problem::class)->find($entity->getProbid());
-                }
-                $entityManager->remove($entity);
-            });
-
-            // Add an audit log entry
-            $auditLogType = Utils::tableForEntity($entity);
-            $DOMJudgeService->auditlog($auditLogType, implode(', ', $primaryKeyData), 'deleted');
-
-            // Trigger the delete event
-            if ($endpoint = $eventLogService->endpointForEntity($entity)) {
-                foreach ($contestsForEntity as $contest) {
-                    // When the $entity is a contest it has no id anymore after the EntityManager->remove
-                    // for this reason we either remember it or check all other contests and use their cid
-                    if (!$entity instanceof Contest) {
-                        $cid = $contest->getCid();
-                    }
-                    // TODO: cascade deletes. Maybe use getDependentEntities()?
-                    $eventLogService->log($endpoint, $primaryKeyData[0],
-                        EventLogService::ACTION_DELETE,
-                        $cid, null, null, false);
-                }
-            }
-
-            if ($entity instanceof Team) {
-                // No need to do this in a transaction, since the chance of a team
-                // with same ID being created at the same time is negligible.
-                $entityManager->getConnection()->executeQuery(
-                    'DELETE FROM scorecache WHERE teamid = :teamid',
-                    [':teamid' => $entityId]
-                );
-                $entityManager->getConnection()->executeQuery(
-                    'DELETE FROM rankcache WHERE teamid = :teamid',
-                    [':teamid' => $entityId]
-                );
-            }
-
-            $msg = sprintf('Successfully deleted %s %s "%s"',
-                           $readableType, implode(', ', $primaryKeyData), $description);
+            $msg = implode('\n', $msgList);
             $this->addFlash('success', $msg);
             if ($request->isXmlHttpRequest()) {
                 return new JsonResponse(['url' => $redirectUrl]);
-            } else {
-                return $this->redirect($redirectUrl);
             }
-        } else {
-            $data = [
-                'type' => $readableType,
-                'primaryKey' => implode(', ', $primaryKeyData),
-                'description' => $description,
-                'messages' => $messages,
-                'isError' => $isError,
-                'showModalSubmit' => !$isError,
-                'modalUrl' => $request->getRequestUri(),
-                'redirectUrl' => $redirectUrl,
-            ];
-            if ($request->isXmlHttpRequest()) {
-                return $this->render('jury/delete_modal.html.twig', $data);
-            } else {
-                return $this->render('jury/delete.html.twig', $data);
-            }
+
+            return $this->redirect($redirectUrl);
         }
+
+        $descriptions = [];
+        foreach ($entities as $entity) {
+            $descriptions[] = $entity->getShortDescription();
+        }
+
+        $data = [
+            'type' => $readableType,
+            'primaryKey' => implode(', ', $primaryKeyData),
+            'description' => implode(',', $descriptions),
+            'messages' => $messages,
+            'isError' => $isError,
+            'showModalSubmit' => !$isError,
+            'modalUrl' => $request->getRequestUri(),
+            'redirectUrl' => $redirectUrl,
+        ];
+        if ($request->isXmlHttpRequest()) {
+            return $this->render('jury/delete_modal.html.twig', $data);
+        }
+
+        return $this->render('jury/delete.html.twig', $data);
     }
 
-    protected function getDependentEntities(string $entityClass, array $relations)
+    protected function getDependentEntities(string $entityClass, array $relations): array
     {
         $result = [];
         // We do a BFS through the list of tables.
@@ -360,13 +421,13 @@ abstract class BaseController extends AbstractController
             if (in_array($currentEntity, $result)) {
                 continue;
             }
-            if ($currentEntity != $entityClass) {
+            if ($currentEntity !== $entityClass) {
                 $result[] = $currentEntity;
             }
 
             foreach ($relations as $nextEntity => $relatedEntities) {
                 foreach ($relatedEntities as $constraint) {
-                    if ($constraint['target'] == $currentEntity && $constraint['type'] == 'CASCADE') {
+                    if ($constraint['target'] === $currentEntity && $constraint['type'] === 'CASCADE') {
                         $queue[] = $nextEntity;
                     }
                 }
@@ -383,7 +444,8 @@ abstract class BaseController extends AbstractController
      *
      * @return Contest[]
      */
-    protected function contestsForEntity($entity, DOMJudgeService $dj) {
+    protected function contestsForEntity($entity, DOMJudgeService $dj): array
+    {
         // Determine contests to emit an event for for the given entity:
         // * If the entity is a Problem entity, use the getContest()
         //   of every contest problem in getContestProblems()
@@ -417,5 +479,18 @@ abstract class BaseController extends AbstractController
         }
 
         return $contests;
+    }
+
+    /**
+     * Stream a response with the given callback.
+     *
+     * The callback can use ob_flush(); flush(); to flush its output to the browser.
+     */
+    protected function streamResponse(callable $callback): StreamedResponse
+    {
+        $response         = new StreamedResponse();
+        $response->headers->set('X-Accel-Buffering', 'no');
+        $response->setCallback($callback);
+        return $response;
     }
 }

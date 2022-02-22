@@ -62,22 +62,11 @@ function dj_file_get_contents(string $filename, int $maxsize = -1) : string
 }
 
 /**
- * Wrapper around PHP's htmlspecialchars() to set desired options globally:
- *
- * - ENT_QUOTES: Also convert single quotes, in case string is contained
- *   in a single quoted context.
- * - ENT_HTML5: Display those single quotes as the HTML5 entity &apos;.
- * - ENT_SUBSTITUTE: Replace any invalid Unicode characters with the
- *   Unicode replacement character.
- *
- * Additionally, set the character set explicitly to the DOMjudge global
- * character set.
+ * Fix broken behaviour of escapeshellarg that it doesn't return '' for an
+ * empty string.
  */
-function specialchars(string $string) : string
+function dj_escapeshellarg(?string $arg) : string
 {
-    return htmlspecialchars(
-        $string,
-        ENT_QUOTES | ENT_HTML5 | ENT_SUBSTITUTE,
-        DJ_CHARACTER_SET
-    );
+    if (!isset($arg) || $arg==='') return "''";
+    return escapeshellarg($arg);
 }

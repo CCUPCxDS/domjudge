@@ -5,15 +5,16 @@ namespace App\Entity;
 use Doctrine\ORM\Mapping as ORM;
 
 /**
- * Files associated to a submission
+ * Files associated to a submission.
+ *
  * @ORM\Entity()
  * @ORM\Table(
  *     name="submission_file",
  *     options={"collate"="utf8mb4_unicode_ci", "charset"="utf8mb4", "comment"="Files associated to a submission"},
  *     indexes={@ORM\Index(name="submitid", columns={"submitid"})},
  *     uniqueConstraints={
- *         @ORM\UniqueConstraint(name="rank", columns={"submitid", "rank"}),
- *         @ORM\UniqueConstraint(name="filename", columns={"submitid", "filename"}, options={"lengths": {NULL, "190"}})
+ *         @ORM\UniqueConstraint(name="rankindex", columns={"submitid", "ranknumber"}),
+ *         @ORM\UniqueConstraint(name="filename", columns={"submitid", "filename"}, options={"lengths": {NULL, 190}})
  *     })
  */
 class SubmissionFile
@@ -30,14 +31,6 @@ class SubmissionFile
     private $submitfileid;
 
     /**
-     * @var int
-     * @ORM\Column(type="integer", name="submitid", length=4,
-     *     options={"comment"="Submission this file belongs to","unsigned"=true},
-     *     nullable=false)
-     */
-    private $submitid;
-
-    /**
      * @var string
      * @ORM\Column(type="string", name="filename", length=255, options={"comment"="Filename as submitted"}, nullable=false)
      */
@@ -45,11 +38,11 @@ class SubmissionFile
 
     /**
      * @var int
-     * @ORM\Column(type="integer", name="rank",
+     * @ORM\Column(type="integer", name="ranknumber",
      *     options={"comment"="Order of the submission files, zero-indexed", "unsigned"=true},
      *     nullable=false)
      */
-    private $rank;
+    private $ranknumber;
 
     /**
      * @ORM\ManyToOne(targetEntity="Submission", inversedBy="files")
@@ -64,132 +57,51 @@ class SubmissionFile
      */
     private $sourcecode;
 
-    /**
-     * Get submitfileid
-     *
-     * @return integer
-     */
-    public function getSubmitfileid()
+    public function getSubmitfileid(): int
     {
         return $this->submitfileid;
     }
 
-    /**
-     * Set submitid
-     *
-     * @param integer $submitid
-     *
-     * @return SubmissionFile
-     */
-    public function setSubmitid($submitid)
-    {
-        $this->submitid = $submitid;
-
-        return $this;
-    }
-
-    /**
-     * Get submitid
-     *
-     * @return integer
-     */
-    public function getSubmitid()
-    {
-        return $this->submitid;
-    }
-
-    /**
-     * Set filename
-     *
-     * @param string $filename
-     *
-     * @return SubmissionFile
-     */
-    public function setFilename($filename)
+    public function setFilename(string $filename): SubmissionFile
     {
         $this->filename = $filename;
-
         return $this;
     }
 
-    /**
-     * Get filename
-     *
-     * @return string
-     */
-    public function getFilename()
+    public function getFilename(): string
     {
         return $this->filename;
     }
 
-    /**
-     * Set rank
-     *
-     * @param integer $rank
-     *
-     * @return SubmissionFile
-     */
-    public function setRank($rank)
+    public function setRank(int $rank): SubmissionFile
     {
-        $this->rank = $rank;
-
+        $this->ranknumber = $rank;
         return $this;
     }
 
-    /**
-     * Get rank
-     *
-     * @return integer
-     */
-    public function getRank()
+    public function getRank(): int
     {
-        return $this->rank;
+        return $this->ranknumber;
     }
 
-    /**
-     * Set submission
-     *
-     * @param Submission $submission
-     *
-     * @return SubmissionFile
-     */
-    public function setSubmission(Submission $submission = null)
+    public function setSubmission(?Submission $submission = null): SubmissionFile
     {
         $this->submission = $submission;
-
         return $this;
     }
 
-    /**
-     * Get submission
-     *
-     * @return Submission
-     */
-    public function getSubmission()
+    public function getSubmission(): Submission
     {
         return $this->submission;
     }
 
-    /**
-     * Set sourcecode
-     *
-     * @param string $sourcecode
-     *
-     * @return SubmissionFile
-     */
-    public function setSourcecode($sourcecode)
+    public function setSourcecode(string $sourcecode): SubmissionFile
     {
         $this->sourcecode = $sourcecode;
-
         return $this;
     }
 
-    /**
-     * Get sourcecode
-     *
-     * @return string
-     */
-    public function getSourcecode()
+    public function getSourcecode(): string
     {
         return $this->sourcecode;
     }

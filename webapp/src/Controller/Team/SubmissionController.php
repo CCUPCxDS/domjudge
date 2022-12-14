@@ -123,7 +123,8 @@ class SubmissionController extends BaseController
     {
         $verificationRequired = (bool)$this->config->get('verification_required');
         $showCompile      = $this->config->get('show_compile');
-        $showSampleOutput = $this->config->get('show_sample_output');
+        $showTestcaseResult = $this->config->get('show_testcase_result');
+        $showResultDetail = $this->config->get('show_result_detail');
         $allowDownload    = (bool)$this->config->get('allow_team_submission_download');
         $user             = $this->dj->getUser();
         $team             = $user->getTeam();
@@ -152,7 +153,7 @@ class SubmissionController extends BaseController
         }
 
         $runs = [];
-        if ($showSampleOutput && $judging && $judging->getResult() !== 'compiler-error') {
+        if ($showTestcaseResult != 0 && $judging && $judging->getResult() !== 'compiler-error') {
             $outputDisplayLimit    = (int)$this->config->get('output_display_limit');
             $outputTruncateMessage = sprintf("\n[output display truncated after %d B]\n", $outputDisplayLimit);
 
@@ -163,10 +164,13 @@ class SubmissionController extends BaseController
                 ->leftJoin('jr.output', 'jro')
                 ->select('t', 'jr', 'tc')
                 ->andWhere('t.problem = :problem')
-                ->andWhere('t.sample = 1')
                 ->setParameter('judging', $judging)
                 ->setParameter('problem', $judging->getSubmission()->getProblem())
                 ->orderBy('t.ranknumber');
+
+            if ($showTestcaseResult == 1) {
+                $queryBuilder->andWhere('t.sample = 1');
+            }
 
             if ($outputDisplayLimit < 0) {
                 $queryBuilder
@@ -196,7 +200,8 @@ class SubmissionController extends BaseController
             'verificationRequired' => $verificationRequired,
             'showCompile' => $showCompile,
             'allowDownload' => $allowDownload,
-            'showSampleOutput' => $showSampleOutput,
+            'showTestcaseResult' => $showTestcaseResult,
+            'showResultDetail' => $showResultDetail,
             'runs' => $runs,
         ];
 

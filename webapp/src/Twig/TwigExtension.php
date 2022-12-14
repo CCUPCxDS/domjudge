@@ -391,6 +391,11 @@ class TwigExtension extends AbstractExtension implements GlobalsInterface
         /** @var Testcase[] $testcases */
         $results = '';
         $lastTypeSample = true;
+
+        if ($testcases) {
+            $lastTypeSample = $testcases[0]->getSample();
+        }
+
         foreach ($testcases as $testcase) {
             if ($testcase->getSample() != $lastTypeSample) {
                 $results        .= ' | ';

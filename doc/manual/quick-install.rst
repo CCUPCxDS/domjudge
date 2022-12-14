@@ -76,6 +76,14 @@ Submit client
  * Add a ``.netrc`` file with valid team credentials.
  * Run ``submit --help`` to see if it can connect successfully.
 
+Submit client
+-------------
+ * Build the client:
+   ``./configure --with-baseurl=<url> && make submitclient``.
+ * Install it in your path and on the team machines.
+ * Add a ``.netrc`` file with valid team credentials.
+ * Run ``submit --help`` to see if it can connect successfully.
+
 Checking if it works
 --------------------
 It should be done by now. As a check that (almost) everything works,

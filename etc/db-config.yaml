@@ -206,11 +206,24 @@
                 0: never
                 1: only on compilation error(s)
                 2: always
-        -   name: show_sample_output
-            type: bool
-            default_value: false
+        -   name: show_testcase_result
+            type: int
+            default_value: 0
             public: true
-            description: Should teams be able to view a diff of their and the reference output on sample testcases?
+            description: Show what kinds of testcases to user?
+            options:
+                0: none
+                1: only samples
+                2: all
+        -   name: show_result_detail
+            type: int
+            default_value: 0
+            public: true
+            description: Show details of run results?
+            options:
+                0: none
+                1: only run info
+                2: run info and output
         -   name: show_balloons_postfreeze
             type: bool
             default_value: false

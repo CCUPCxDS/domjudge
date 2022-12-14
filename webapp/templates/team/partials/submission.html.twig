@@ -40,6 +40,14 @@
                 <div class="p-2">
                     Result: {{ judging.result | printResult }}
                 </div>
+                {% if runs %}
+                    <div class="p-2">
+                        Testcase runs: 
+                        <div class="d-inline-flex flex-row">
+                            {{ runs | map(r => r.0) | displayTestcaseResults(judging and judging.endtime is not empty) }}
+                        </div>
+                    </div>
+                {% endif %}
             </div>
         {% endif %}
 
@@ -63,12 +71,19 @@
             {% endif %}
         {% endif %}
 
-        {% if showSampleOutput and judging.result != 'compiler-error' %}
+        {% if showTestcaseResult != 0 and judging.result != 'compiler-error' and showResultDetail == 2 %}
             <hr/>
-            <h4 class="text-center">Run(s) on the provided sample data</h4>
+            <h4 class="text-center">
+                Run(s) on
+                {% if showTestcaseResult == 1 %}
+                    the provided sample data
+                {% else %}
+                    all data
+                {% endif %}
+            </h4>
 
             {% if runs is empty %}
-                <p class="nodata">No sample cases available.</p>
+                <p class="nodata">No cases available.</p>
             {% else %}
                 {% for run in runs %}
                     <h5 id="run-{{ run.0.rank }}" class="text-center mt-4">Run {{ run.0.rank }}</h5>
@@ -133,6 +148,6 @@
                     {% endif %}
                 {% endfor %}
             {% endif %} {# not runs is empty #}
-        {% endif %} {# showSampleOutput and judging.result != 'compiler-error' #}
+        {% endif %} {# showTestcaseResult != 0 and judging.result != 'compiler-error' and showResultDetail != 0 #}
     </div>
 {% endif %} {# not (judging is empty or judging.submission.submittime >= current_team_contest.endtime or (verificationRequired and not judging.verified)) #}

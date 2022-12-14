@@ -80,6 +80,11 @@ body.static {
 .sol_incorrect, .compile-unsuccessful { color: red;    }
 .sol_queued       { color: gray;   }
 
+.bg_sol_correct      { background-color: green;  }
+.bg_sol_incorrect    { background-color: red;    }
+.bg_sol_queued       { background-color: gray;   }
+
+
 .judgetime      { font-size: smaller; font-style: italic; }
 .testcases_prev { font-size: xx-small; }
 .prevsubmit     { color: #696969; }
